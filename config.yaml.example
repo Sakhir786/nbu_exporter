@@ -1,0 +1,76 @@
+# NBU Exporter configuration.
+# Copy to /etc/nbu-exporter/config.yaml and edit for your environment.
+
+# HTTP server settings for the exporter itself
+server:
+  listenAddress: "0.0.0.0:2112"
+  shutdownTimeoutSeconds: 10
+
+# Logging
+logging:
+  level: info           # debug, info, warning, error
+  format: text          # text or json
+
+# NetBackup master API connection
+nbu:
+  scheme: https
+  host: nbu-master.example.com
+  port: 1556
+  basePath: /netbackup
+  apiVersion: "3.0"
+  contentType: "application/vnd.netbackup+json;version=3.0"
+  apiKey: "REPLACE_WITH_NBU_API_KEY"
+  insecureSkipVerify: false
+  caCertFile: ""        # optional path to a CA bundle if NBU uses self-signed certs
+  requestTimeoutSeconds: 30
+  maxRetries: 3
+  retryBackoffSeconds: 2
+
+# Collector toggles and per-collector tuning.
+# Set enabled: false on any collector to disable it without affecting others.
+collectors:
+  health:
+    enabled: true       # nbu_up, nbu_api_version, scrape signals — keep enabled
+  jobs:
+    enabled: true
+    lookbackHours: 24
+    pageSize: 500
+    maxPages: 200       # safety cap; warn if hit
+    cacheTTLSeconds: 60 # jobs result is shared with job_states, clients, policies, catalog
+  jobStates:
+    enabled: true
+  clients:
+    enabled: true
+    cacheTTLSeconds: 300  # 5 minutes — client inventory changes infrequently
+  policies:
+    enabled: true
+    cacheTTLSeconds: 600  # 10 minutes
+  storageUnits:
+    enabled: true
+    cacheTTLSeconds: 300
+    # Storage units whose `type` matches this regex are treated as "cloud" — for these,
+    # the NBU API returns int64-max as free bytes, which would break % Used calcs.
+    # The exporter still emits used bytes for these; the regex only marks them so
+    # downstream alerts/dashboards can filter.
+    cloudTypePattern: "^(amazon|wasabi|azure|gcp|google).*"
+  diskPools:
+    enabled: true
+    cacheTTLSeconds: 300
+    # Numeric state codes reported by the API that we consider "UP".
+    # Default covers known values; adjust if your NBU version reports differently.
+    upStateValues: [2, 1]
+  storageServers:
+    enabled: true
+    cacheTTLSeconds: 300
+  msdp:
+    enabled: true
+    cacheTTLSeconds: 300
+    # Server-type strings (as returned by the disk-pools API) that identify
+    # MSDP/PureDisk pools eligible for dedup metrics.
+    serverTypePattern: "(?i)(msdp|puredisk)"
+  catalog:
+    enabled: true
+    cacheTTLSeconds: 600
+    # Policy types that represent catalog backups (varies by NBU version).
+    policyTypeValues:
+      - "NBU-Catalog"
