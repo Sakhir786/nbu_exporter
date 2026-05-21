@@ -67,11 +67,7 @@ All settings live in `/etc/nbu-exporter/config.yaml`. See
 
 ## Metrics
 
-### Preserved metrics (compatible with `fjacquet/nbu_exporter`)
-
-Metric naming overlap with `fjacquet/nbu_exporter` is preserved deliberately
-so existing Grafana dashboards continue to work without modification. This is
-otherwise an independent implementation.
+### Core metrics
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -171,12 +167,6 @@ make type           # mypy --strict nbu_exporter
 make test           # pytest with coverage
 make check          # all of the above
 ```
-
-## Compatibility
-
-Metric names overlapping with `fjacquet/nbu_exporter` are preserved
-deliberately so existing Grafana dashboards continue to work without
-modification. This is otherwise an independent implementation in Python.
 
 ## License
 
