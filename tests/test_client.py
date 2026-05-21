@@ -185,3 +185,30 @@ def test_api_key_not_in_describe_url() -> None:
     client = NBUClient(cfg)
     assert cfg.apiKey not in client.describe()
     assert cfg.apiKey not in client.base_url
+
+
+def test_insecure_skip_verify_silences_urllib3_warning() -> None:
+    """When insecureSkipVerify is true, urllib3's InsecureRequestWarning is filtered."""
+    import warnings
+
+    import urllib3
+
+    cfg = _cfg()
+    cfg.insecureSkipVerify = True
+    NBUClient(cfg)
+    # After construction, the InsecureRequestWarning category must appear in
+    # the active warning filter list as an "ignore" entry.
+    assert any(
+        action == "ignore" and category is urllib3.exceptions.InsecureRequestWarning
+        for (action, _msg, category, _mod, _lineno) in warnings.filters
+    ), "expected an 'ignore' filter for urllib3.exceptions.InsecureRequestWarning"
+
+
+def test_verify_still_on_when_skip_not_requested() -> None:
+    cfg = _cfg()
+    cfg.insecureSkipVerify = False
+    client = NBUClient(cfg)
+    # The Session keeps verify=True by default.
+    # We can't easily probe the disabled-warning state here without leaking
+    # global filters; just confirm the session is configured to verify.
+    assert client._session.verify is True  # noqa: SLF001

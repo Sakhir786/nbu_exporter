@@ -73,6 +73,17 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         LOGGER.debug("http %s - " + format, self.address_string(), *args)
 
+    def handle_one_request(self) -> None:
+        # Prometheus and curl regularly disconnect mid-response (tight scrape
+        # timeouts, Ctrl-C, etc). The metrics for this scrape are already
+        # generated, so a broken pipe is harmless — swallow it instead of
+        # letting socketserver print a stack trace to journald.
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+            LOGGER.debug("client %s disconnected mid-response: %s", self.address_string(), exc)
+            self.close_connection = True
+
     def do_GET(self) -> None:  # noqa: N802 — stdlib API
         if self.path.startswith("/metrics"):
             output = generate_latest(self.registry)

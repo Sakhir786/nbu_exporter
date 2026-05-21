@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -59,6 +60,10 @@ class NBUClient:
         )
         if cfg.insecureSkipVerify:
             session.verify = False
+            # Operator opted into skipping TLS verification — silence the
+            # per-request InsecureRequestWarning that would otherwise flood
+            # journald with one line per HTTP call.
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         elif cfg.caCertFile:
             session.verify = cfg.caCertFile
         else:
