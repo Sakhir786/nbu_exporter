@@ -25,31 +25,40 @@ nbu:
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBackoffSeconds: 2
-  # Pagination query parameters changed between NBU versions:
-  #   jsonapi - page[limit] / page[offset]  (NBU 10.1 and newer)
-  #   legacy  - limit / offset              (NBU 8.x, 9.x, 10.0)
-  #   auto    - try jsonapi first; on HTTP 400 fall back to legacy.
-  #             The detected style is cached per endpoint after the first
-  #             successful page, so the probe only runs once.
-  # Default is auto; pin it explicitly if you know your version.
-  paginationStyle: auto
+
+  # Pagination defaults applied to every NBU REST endpoint.
+  # Individual collectors below may override pageSize / maxPages.
+  #
+  # See README "Compatibility" for the NBU-version → values matrix:
+  #   NBU 8.x / 9.x         → pageSize 100, style legacy
+  #   NBU 10.0              → pageSize 100, style jsonapi
+  #   NBU 10.1-10.4         → pageSize 500, style jsonapi
+  #   NBU 10.5 / 11.x+      → pageSize 500+, style jsonapi
+  pagination:
+    pageSize: 100         # records per page (NBU 10.0 caps at 100, 10.1+ allows 500+)
+    maxPages: 200         # safety cap on the pagination walk
+    style: jsonapi        # "jsonapi" (page[limit]/page[offset]) or "legacy" (limit/offset)
 
 # Collector toggles and per-collector tuning.
 # Set enabled: false on any collector to disable it without affecting others.
+# Each collector may also override pageSize / maxPages individually; values
+# left unset (or null) inherit nbu.pagination above.
 collectors:
   health:
     enabled: true       # nbu_up, nbu_api_version, scrape signals — keep enabled
   jobs:
     enabled: true
     lookbackHours: 24
-    pageSize: 500
-    maxPages: 200       # safety cap; warn if hit
     cacheTTLSeconds: 60 # jobs result is shared with job_states, clients, policies, catalog
+    # pageSize: 500     # override nbu.pagination.pageSize for /admin/jobs only
+    # maxPages: 400
   jobStates:
     enabled: true
   clients:
     enabled: true
     cacheTTLSeconds: 300  # 5 minutes — client inventory changes infrequently
+    # pageSize: 200
+    # maxPages: 100
   policies:
     enabled: true
     cacheTTLSeconds: 600  # 10 minutes

@@ -28,7 +28,7 @@ from prometheus_client.metrics_core import (
 from nbu_exporter import __version__
 from nbu_exporter.cache import TTLCache
 from nbu_exporter.client import NBUClient
-from nbu_exporter.config import CollectorsConfig
+from nbu_exporter.config import Config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,14 +117,17 @@ class JobsCollector:
 
     name = "jobs"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._jobs_cfg = cfg.jobs
-        self._states_enabled = cfg.jobStates.enabled
-        self._policy_jobs_enabled = cfg.policies.enabled
-        self._client_jobs_enabled = cfg.clients.enabled
+        self._jobs_cfg = cfg.collectors.jobs
+        self._states_enabled = cfg.collectors.jobStates.enabled
+        self._policy_jobs_enabled = cfg.collectors.policies.enabled
+        self._client_jobs_enabled = cfg.collectors.clients.enabled
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.jobs.pageSize, cfg.collectors.jobs.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.jobs.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.jobs.cacheTTLSeconds,
             fetcher=self._fetch_jobs,
         )
 
@@ -136,8 +139,9 @@ class JobsCollector:
         jobs = self._client.get_all(
             "/admin/jobs",
             params=params,
-            page_size=self._jobs_cfg.pageSize,
-            max_pages=self._jobs_cfg.maxPages,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
         LOGGER.info(
             "jobs collector: fetched %d jobs in %.2fs (lookback=%dh)",
@@ -286,21 +290,24 @@ class JobsCollector:
 class ClientsCollector:
     name = "clients"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg.clients
+        self._cfg = cfg.collectors.clients
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.clients.pageSize, cfg.collectors.clients.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.clients.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.clients.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
     def _fetch(self) -> list[dict[str, Any]]:
-        # Page size and cap reuse the jobs collector limits to stay bounded.
         return self._client.get_all(
             "/config/hosts",
             params={"filter": "hostType eq 'CLIENT'"},
-            page_size=500,
-            max_pages=200,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -329,11 +336,14 @@ class ClientsCollector:
 class PoliciesCollector:
     name = "policies"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg.policies
+        self._cfg = cfg.collectors.policies
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.policies.pageSize, cfg.collectors.policies.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.policies.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.policies.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
@@ -341,8 +351,9 @@ class PoliciesCollector:
         return self._client.get_all(
             "/config/policies",
             params=None,
-            page_size=500,
-            max_pages=200,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -371,12 +382,15 @@ class PoliciesCollector:
 class StorageUnitsCollector:
     name = "storage_units"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg.storageUnits
-        self._cloud_re = re.compile(cfg.storageUnits.cloudTypePattern)
+        self._cfg = cfg.collectors.storageUnits
+        self._cloud_re = re.compile(cfg.collectors.storageUnits.cloudTypePattern)
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.storageUnits.pageSize, cfg.collectors.storageUnits.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.storageUnits.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.storageUnits.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
@@ -384,8 +398,9 @@ class StorageUnitsCollector:
         return self._client.get_all(
             "/storage/storage-units",
             params=None,
-            page_size=500,
-            max_pages=200,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -418,12 +433,15 @@ class StorageUnitsCollector:
 class DiskPoolsCollector:
     name = "disk_pools"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg.diskPools
-        self._up_states = set(cfg.diskPools.upStateValues)
+        self._cfg = cfg.collectors.diskPools
+        self._up_states = set(cfg.collectors.diskPools.upStateValues)
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.diskPools.pageSize, cfg.collectors.diskPools.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.diskPools.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.diskPools.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
@@ -431,8 +449,9 @@ class DiskPoolsCollector:
         return self._client.get_all(
             "/storage/disk-pools",
             params=None,
-            page_size=500,
-            max_pages=200,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -511,11 +530,14 @@ class DiskPoolsCollector:
 class StorageServersCollector:
     name = "storage_servers"
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg.storageServers
+        self._cfg = cfg.collectors.storageServers
+        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
+            cfg.collectors.storageServers.pageSize, cfg.collectors.storageServers.maxPages
+        )
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.storageServers.cacheTTLSeconds,
+            ttl_seconds=cfg.collectors.storageServers.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
@@ -523,8 +545,9 @@ class StorageServersCollector:
         return self._client.get_all(
             "/storage/storage-servers",
             params=None,
-            page_size=500,
-            max_pages=200,
+            page_size=self._page_size,
+            max_pages=self._max_pages,
+            style=self._style,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -564,12 +587,12 @@ class MSDPCollector:
     def __init__(
         self,
         client: NBUClient,
-        cfg: CollectorsConfig,
+        cfg: Config,
         disk_pools_cache: TTLCache[list[dict[str, Any]]],
     ) -> None:
         self._client = client
-        self._cfg = cfg.msdp
-        self._pattern = re.compile(cfg.msdp.serverTypePattern)
+        self._cfg = cfg.collectors.msdp
+        self._pattern = re.compile(cfg.collectors.msdp.serverTypePattern)
         self._disk_pools_cache = disk_pools_cache
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -636,11 +659,11 @@ class CatalogCollector:
 
     def __init__(
         self,
-        cfg: CollectorsConfig,
+        cfg: Config,
         jobs_cache: TTLCache[list[dict[str, Any]]],
     ) -> None:
-        self._cfg = cfg.catalog
-        self._types = {t.lower() for t in cfg.catalog.policyTypeValues}
+        self._cfg = cfg.collectors.catalog
+        self._types = {t.lower() for t in cfg.collectors.catalog.policyTypeValues}
         self._jobs_cache = jobs_cache
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
@@ -687,27 +710,30 @@ class CatalogCollector:
 class NBUCollector:
     """Top-level Prometheus collector that orchestrates all sub-collectors."""
 
-    def __init__(self, client: NBUClient, cfg: CollectorsConfig) -> None:
+    def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
-        self._cfg = cfg
+        self._cfg = cfg.collectors
         self._lock = threading.Lock()
         self._error_totals: dict[str, int] = {}
 
-        self._jobs_sub = JobsCollector(client, cfg) if cfg.jobs.enabled else None
-        self._clients_sub = ClientsCollector(client, cfg) if cfg.clients.enabled else None
-        self._policies_sub = PoliciesCollector(client, cfg) if cfg.policies.enabled else None
+        collectors = cfg.collectors
+        self._jobs_sub = JobsCollector(client, cfg) if collectors.jobs.enabled else None
+        self._clients_sub = ClientsCollector(client, cfg) if collectors.clients.enabled else None
+        self._policies_sub = PoliciesCollector(client, cfg) if collectors.policies.enabled else None
         self._storage_units_sub = (
-            StorageUnitsCollector(client, cfg) if cfg.storageUnits.enabled else None
+            StorageUnitsCollector(client, cfg) if collectors.storageUnits.enabled else None
         )
-        self._disk_pools_sub = DiskPoolsCollector(client, cfg) if cfg.diskPools.enabled else None
+        self._disk_pools_sub = (
+            DiskPoolsCollector(client, cfg) if collectors.diskPools.enabled else None
+        )
         self._storage_servers_sub = (
-            StorageServersCollector(client, cfg) if cfg.storageServers.enabled else None
+            StorageServersCollector(client, cfg) if collectors.storageServers.enabled else None
         )
         self._msdp_sub = None
-        if cfg.msdp.enabled and self._disk_pools_sub is not None:
+        if collectors.msdp.enabled and self._disk_pools_sub is not None:
             self._msdp_sub = MSDPCollector(client, cfg, self._disk_pools_sub.cache)
         self._catalog_sub = None
-        if cfg.catalog.enabled and self._jobs_sub is not None:
+        if collectors.catalog.enabled and self._jobs_sub is not None:
             self._catalog_sub = CatalogCollector(cfg, self._jobs_sub.cache)
 
     def _enabled_map(self) -> dict[str, bool]:

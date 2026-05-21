@@ -86,3 +86,61 @@ def test_default_config_invalid() -> None:
     cfg = Config()
     with pytest.raises(ValueError):
         cfg.validate()
+
+
+def test_default_pagination_block(tmp_path: Path) -> None:
+    """nbu.pagination block has sensible NBU-10.0-safe defaults."""
+    cfg = load_config(_write(tmp_path, VALID))
+    assert cfg.nbu.pagination.pageSize == 100
+    assert cfg.nbu.pagination.maxPages == 200
+    assert cfg.nbu.pagination.style == "jsonapi"
+
+
+def test_pagination_block_invalid_style_rejected(tmp_path: Path) -> None:
+    body = 'nbu:\n  host: h\n  apiKey: k\n  apiVersion: "3.0"\n  pagination:\n    style: weird\n'
+    with pytest.raises(ValueError, match="pagination.style"):
+        load_config(_write(tmp_path, body))
+
+
+def test_pagination_block_non_positive_rejected(tmp_path: Path) -> None:
+    body = 'nbu:\n  host: h\n  apiKey: k\n  apiVersion: "3.0"\n  pagination:\n    pageSize: 0\n'
+    with pytest.raises(ValueError, match="pagination.pageSize"):
+        load_config(_write(tmp_path, body))
+
+
+def test_collector_overrides_pagination(tmp_path: Path) -> None:
+    """Per-collector pageSize/maxPages override nbu.pagination."""
+    body = """
+nbu:
+  host: nbu.example.com
+  apiKey: my-real-key
+  apiVersion: "3.0"
+  pagination:
+    pageSize: 100
+    maxPages: 200
+    style: jsonapi
+collectors:
+  jobs:
+    pageSize: 500
+    maxPages: 50
+"""
+    cfg = load_config(_write(tmp_path, body))
+    ps, mp, style = cfg.resolve_pagination(
+        cfg.collectors.jobs.pageSize, cfg.collectors.jobs.maxPages
+    )
+    assert (ps, mp, style) == (500, 50, "jsonapi")
+    # A collector that didn't override inherits nbu.pagination defaults.
+    ps2, mp2, style2 = cfg.resolve_pagination(
+        cfg.collectors.clients.pageSize, cfg.collectors.clients.maxPages
+    )
+    assert (ps2, mp2, style2) == (100, 200, "jsonapi")
+
+
+def test_resolve_pagination_uses_legacy_for_nbu_8_or_9(tmp_path: Path) -> None:
+    body = (
+        'nbu:\n  host: h\n  apiKey: k\n  apiVersion: "3.0"\n'
+        "  pagination:\n    style: legacy\n    pageSize: 100\n"
+    )
+    cfg = load_config(_write(tmp_path, body))
+    _, _, style = cfg.resolve_pagination(None, None)
+    assert style == "legacy"

@@ -55,7 +55,11 @@ All settings live in `/etc/nbu-exporter/config.yaml`. See
 | `nbu.requestTimeoutSeconds` | `30` | Per-request HTTP timeout |
 | `nbu.maxRetries` | `3` | Retry budget for 5xx / 429 / connection errors |
 | `nbu.retryBackoffSeconds` | `2` | Exponential backoff factor |
-| `nbu.paginationStyle` | `auto` | `auto`, `jsonapi`, or `legacy` — see [Compatibility](#compatibility) |
+| `nbu.pagination.pageSize` | `100` | Records per page (default-safe for NBU 10.0; bump to 500 on 10.1+) |
+| `nbu.pagination.maxPages` | `200` | Safety cap on the pagination walk |
+| `nbu.pagination.style` | `jsonapi` | `jsonapi` (`page[limit]`/`page[offset]`) or `legacy` (`limit`/`offset`) |
+| `collectors.<name>.pageSize` | inherits | Per-collector override for pagination page size |
+| `collectors.<name>.maxPages` | inherits | Per-collector override for pagination cap |
 | `collectors.*.enabled` | `true` | Per-collector on/off |
 | `collectors.jobs.lookbackHours` | `24` | Job history window |
 | `collectors.jobs.pageSize` | `500` | JSON:API page size |
@@ -171,21 +175,35 @@ make check          # all of the above
 
 ## Compatibility
 
-### Pagination style by NetBackup version
+Every pagination parameter the exporter sends is config-driven. To support
+a new NetBackup version you change `config.yaml`, never the code.
 
-NetBackup changed its pagination query parameters between releases. The
-exporter picks the right one based on `nbu.paginationStyle`:
+### NetBackup version → pagination matrix
 
-| NetBackup version | Required `paginationStyle` | Query parameters used |
-|---|---|---|
-| NBU 8.x, 9.x, 10.0 | `legacy` | `limit`, `offset` |
-| NBU 10.1 and newer | `jsonapi` | `page[limit]`, `page[offset]` |
-| Unknown / mixed estate | `auto` *(default)* | tries jsonapi, falls back to legacy on HTTP 400 |
+| NBU version | `apiVersion` | `pageSize` max | `style`   |
+|-------------|--------------|----------------|-----------|
+| 8.x         | `3.0`        | 100            | `legacy`  |
+| 9.x         | `5.0`        | 100            | `legacy`  |
+| 10.0        | `7.0`        | 100            | `jsonapi` |
+| 10.1 – 10.4 | `11.0`       | 500            | `jsonapi` |
+| 10.5        | `12.0`       | 500+           | `jsonapi` |
+| 11.x+       | `13.0`       | 500+           | `jsonapi` |
 
-In `auto` mode the exporter probes each endpoint once and caches the
-detected style for the lifetime of the process, so subsequent pages do
-not pay the fallback cost. Pin the style explicitly if you already know
-your master's version — that avoids the one-shot probe at startup.
+Set those three values under `nbu:` in `/etc/nbu-exporter/config.yaml`:
+
+```yaml
+nbu:
+  apiVersion: "7.0"
+  contentType: "application/vnd.netbackup+json;version=7.0"
+  pagination:
+    pageSize: 100
+    maxPages: 200
+    style: jsonapi
+```
+
+Per-collector overrides (`collectors.<name>.pageSize`,
+`collectors.<name>.maxPages`) are honoured; values left unset inherit
+`nbu.pagination`.
 
 ## License
 

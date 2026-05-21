@@ -150,7 +150,7 @@ def _run_server(
             LOGGER.error("config reload failed, keeping current config: %s", exc)
             return
         new_client = NBUClient(new_cfg.nbu)
-        new_collector = NBUCollector(new_client, new_cfg.collectors)
+        new_collector = NBUCollector(new_client, new_cfg)
         old_client = state["client"]
         old_collector = state["collector"]
         reg = state["registry"]
@@ -222,7 +222,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     _configure_logging(cfg.logging.level, cfg.logging.format)
 
     client = NBUClient(cfg.nbu)
-    collector = NBUCollector(client, cfg.collectors)
+    collector = NBUCollector(client, cfg)
     REGISTRY.register(collector)
 
     return _run_server(cfg, REGISTRY, client, collector)

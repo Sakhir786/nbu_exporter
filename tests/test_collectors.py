@@ -17,7 +17,7 @@ from nbu_exporter.collectors import (
     StorageUnitsCollector,
     _parse_iso,
 )
-from nbu_exporter.config import CollectorsConfig
+from nbu_exporter.config import Config
 
 
 def _samples(metric: Metric, name: str) -> list[tuple[dict[str, str], float]]:
@@ -40,7 +40,7 @@ def _fake_client(
 
 
 def test_jobs_collector_metrics_shape() -> None:
-    cfg = CollectorsConfig()
+    cfg = Config()
     jobs = [
         {
             "attributes": {
@@ -88,7 +88,7 @@ def test_jobs_collector_metrics_shape() -> None:
 
 
 def test_storage_units_cloud_pattern_skips_free() -> None:
-    cfg = CollectorsConfig()
+    cfg = Config()
     units = [
         {
             "attributes": {
@@ -119,8 +119,8 @@ def test_storage_units_cloud_pattern_skips_free() -> None:
 
 
 def test_disk_pool_up_state_mapping() -> None:
-    cfg = CollectorsConfig()
-    cfg.diskPools.upStateValues = [2]
+    cfg = Config()
+    cfg.collectors.diskPools.upStateValues = [2]
     pools = [
         {
             "attributes": {
@@ -155,7 +155,7 @@ def test_disk_pool_up_state_mapping() -> None:
 
 
 def test_msdp_only_emits_for_msdp_pools() -> None:
-    cfg = CollectorsConfig()
+    cfg = Config()
     pools = [
         {
             "attributes": {
@@ -187,7 +187,7 @@ def test_msdp_only_emits_for_msdp_pools() -> None:
 
 
 def test_catalog_collector_picks_matching_policy_type() -> None:
-    cfg = CollectorsConfig()
+    cfg = Config()
     jobs = [
         {
             "attributes": {
@@ -235,16 +235,16 @@ def test_parse_iso_handles_variants() -> None:
 
 
 def test_top_level_collector_yields_operational_metrics() -> None:
-    cfg = CollectorsConfig()
+    cfg = Config()
     # Disable everything that hits the network — leave health-only.
-    cfg.jobs.enabled = False
-    cfg.clients.enabled = False
-    cfg.policies.enabled = False
-    cfg.storageUnits.enabled = False
-    cfg.diskPools.enabled = False
-    cfg.storageServers.enabled = False
-    cfg.msdp.enabled = False
-    cfg.catalog.enabled = False
+    cfg.collectors.jobs.enabled = False
+    cfg.collectors.clients.enabled = False
+    cfg.collectors.policies.enabled = False
+    cfg.collectors.storageUnits.enabled = False
+    cfg.collectors.diskPools.enabled = False
+    cfg.collectors.storageServers.enabled = False
+    cfg.collectors.msdp.enabled = False
+    cfg.collectors.catalog.enabled = False
     client = MagicMock()
     client._cfg.apiVersion = "3.0"
     coll = NBUCollector(client, cfg)
@@ -254,7 +254,7 @@ def test_top_level_collector_yields_operational_metrics() -> None:
 
 def test_cloud_pattern_is_anchored() -> None:
     """Sanity check: cfg.storageUnits.cloudTypePattern matches the expected prefixes."""
-    pattern = re.compile(CollectorsConfig().storageUnits.cloudTypePattern)
+    pattern = re.compile(Config().collectors.storageUnits.cloudTypePattern)
     assert pattern.match("amazon_s3")
     assert pattern.match("wasabi")
     assert pattern.match("azure_blob")

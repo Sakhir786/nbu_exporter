@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+PAGINATION_STYLES = ("jsonapi", "legacy")
+
 
 @dataclass
 class ServerConfig:
@@ -26,6 +28,20 @@ class LoggingConfig:
 
 
 @dataclass
+class PaginationConfig:
+    """Pagination defaults for every NBU REST API endpoint.
+
+    Per-collector blocks may override ``pageSize`` / ``maxPages``; the values
+    here are the fallback. ``style`` is master-wide and picked by NBU version
+    — see the Compatibility matrix in the README.
+    """
+
+    pageSize: int = 100
+    maxPages: int = 200
+    style: str = "jsonapi"
+
+
+@dataclass
 class NBUConfig:
     """NetBackup master REST API connection settings."""
 
@@ -41,7 +57,7 @@ class NBUConfig:
     requestTimeoutSeconds: int = 30
     maxRetries: int = 3
     retryBackoffSeconds: int = 2
-    paginationStyle: str = "auto"
+    pagination: PaginationConfig = field(default_factory=PaginationConfig)
 
 
 @dataclass
@@ -53,9 +69,9 @@ class HealthCollectorConfig:
 class JobsCollectorConfig:
     enabled: bool = True
     lookbackHours: int = 24
-    pageSize: int = 500
-    maxPages: int = 200
     cacheTTLSeconds: int = 60
+    pageSize: int | None = None  # inherit nbu.pagination.pageSize
+    maxPages: int | None = None  # inherit nbu.pagination.maxPages
 
 
 @dataclass
@@ -67,12 +83,16 @@ class JobStatesCollectorConfig:
 class ClientsCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 300
+    pageSize: int | None = None
+    maxPages: int | None = None
 
 
 @dataclass
 class PoliciesCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 600
+    pageSize: int | None = None
+    maxPages: int | None = None
 
 
 @dataclass
@@ -80,6 +100,8 @@ class StorageUnitsCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 300
     cloudTypePattern: str = "^(amazon|wasabi|azure|gcp|google).*"
+    pageSize: int | None = None
+    maxPages: int | None = None
 
 
 @dataclass
@@ -87,12 +109,16 @@ class DiskPoolsCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 300
     upStateValues: list[int] = field(default_factory=lambda: [2, 1])
+    pageSize: int | None = None
+    maxPages: int | None = None
 
 
 @dataclass
 class StorageServersCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 300
+    pageSize: int | None = None
+    maxPages: int | None = None
 
 
 @dataclass
@@ -152,6 +178,20 @@ class Config:
     nbu: NBUConfig = field(default_factory=NBUConfig)
     collectors: CollectorsConfig = field(default_factory=CollectorsConfig)
 
+    def resolve_pagination(
+        self, page_size: int | None, max_pages: int | None
+    ) -> tuple[int, int, str]:
+        """Resolve a collector's effective (pageSize, maxPages, style).
+
+        ``None`` values fall back to ``nbu.pagination``. Style is master-wide.
+        """
+        p = self.nbu.pagination
+        return (
+            page_size if page_size is not None else p.pageSize,
+            max_pages if max_pages is not None else p.maxPages,
+            p.style,
+        )
+
     def validate(self) -> None:
         """Raise ValueError when required fields are missing or invalid."""
         if not self.nbu.host:
@@ -166,14 +206,18 @@ class Config:
             raise ValueError("nbu.maxRetries must be >= 0")
         if self.nbu.retryBackoffSeconds < 0:
             raise ValueError("nbu.retryBackoffSeconds must be >= 0")
-        if self.nbu.paginationStyle not in ("auto", "jsonapi", "legacy"):
-            raise ValueError(
-                "nbu.paginationStyle must be one of: auto, jsonapi, legacy"
-            )
         if self.server.shutdownTimeoutSeconds <= 0:
             raise ValueError("server.shutdownTimeoutSeconds must be > 0")
         if not self.collectors.any_enabled():
             raise ValueError("at least one collector must be enabled")
+
+        p = self.nbu.pagination
+        if p.pageSize <= 0:
+            raise ValueError("nbu.pagination.pageSize must be > 0")
+        if p.maxPages <= 0:
+            raise ValueError("nbu.pagination.maxPages must be > 0")
+        if p.style not in PAGINATION_STYLES:
+            raise ValueError(f"nbu.pagination.style must be one of: {', '.join(PAGINATION_STYLES)}")
 
         for name, ttl in (
             ("jobs", self.collectors.jobs.cacheTTLSeconds),
@@ -190,10 +234,31 @@ class Config:
 
         if self.collectors.jobs.lookbackHours <= 0:
             raise ValueError("collectors.jobs.lookbackHours must be > 0")
-        if self.collectors.jobs.pageSize <= 0:
-            raise ValueError("collectors.jobs.pageSize must be > 0")
-        if self.collectors.jobs.maxPages <= 0:
-            raise ValueError("collectors.jobs.maxPages must be > 0")
+
+        for name, page_size, max_pages in (
+            ("jobs", self.collectors.jobs.pageSize, self.collectors.jobs.maxPages),
+            ("clients", self.collectors.clients.pageSize, self.collectors.clients.maxPages),
+            ("policies", self.collectors.policies.pageSize, self.collectors.policies.maxPages),
+            (
+                "storageUnits",
+                self.collectors.storageUnits.pageSize,
+                self.collectors.storageUnits.maxPages,
+            ),
+            (
+                "diskPools",
+                self.collectors.diskPools.pageSize,
+                self.collectors.diskPools.maxPages,
+            ),
+            (
+                "storageServers",
+                self.collectors.storageServers.pageSize,
+                self.collectors.storageServers.maxPages,
+            ),
+        ):
+            if page_size is not None and page_size <= 0:
+                raise ValueError(f"collectors.{name}.pageSize must be > 0")
+            if max_pages is not None and max_pages <= 0:
+                raise ValueError(f"collectors.{name}.maxPages must be > 0")
 
 
 def _merge_dataclass(target: Any, data: dict[str, Any]) -> None:
