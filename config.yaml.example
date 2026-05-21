@@ -25,6 +25,14 @@ nbu:
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBackoffSeconds: 2
+  # Pagination query parameters changed between NBU versions:
+  #   jsonapi - page[limit] / page[offset]  (NBU 10.1 and newer)
+  #   legacy  - limit / offset              (NBU 8.x, 9.x, 10.0)
+  #   auto    - try jsonapi first; on HTTP 400 fall back to legacy.
+  #             The detected style is cached per endpoint after the first
+  #             successful page, so the probe only runs once.
+  # Default is auto; pin it explicitly if you know your version.
+  paginationStyle: auto
 
 # Collector toggles and per-collector tuning.
 # Set enabled: false on any collector to disable it without affecting others.

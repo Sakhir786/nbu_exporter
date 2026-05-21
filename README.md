@@ -55,6 +55,7 @@ All settings live in `/etc/nbu-exporter/config.yaml`. See
 | `nbu.requestTimeoutSeconds` | `30` | Per-request HTTP timeout |
 | `nbu.maxRetries` | `3` | Retry budget for 5xx / 429 / connection errors |
 | `nbu.retryBackoffSeconds` | `2` | Exponential backoff factor |
+| `nbu.paginationStyle` | `auto` | `auto`, `jsonapi`, or `legacy` — see [Compatibility](#compatibility) |
 | `collectors.*.enabled` | `true` | Per-collector on/off |
 | `collectors.jobs.lookbackHours` | `24` | Job history window |
 | `collectors.jobs.pageSize` | `500` | JSON:API page size |
@@ -167,6 +168,24 @@ make type           # mypy --strict nbu_exporter
 make test           # pytest with coverage
 make check          # all of the above
 ```
+
+## Compatibility
+
+### Pagination style by NetBackup version
+
+NetBackup changed its pagination query parameters between releases. The
+exporter picks the right one based on `nbu.paginationStyle`:
+
+| NetBackup version | Required `paginationStyle` | Query parameters used |
+|---|---|---|
+| NBU 8.x, 9.x, 10.0 | `legacy` | `limit`, `offset` |
+| NBU 10.1 and newer | `jsonapi` | `page[limit]`, `page[offset]` |
+| Unknown / mixed estate | `auto` *(default)* | tries jsonapi, falls back to legacy on HTTP 400 |
+
+In `auto` mode the exporter probes each endpoint once and caches the
+detected style for the lifetime of the process, so subsequent pages do
+not pay the fallback cost. Pin the style explicitly if you already know
+your master's version — that avoids the one-shot probe at startup.
 
 ## License
 

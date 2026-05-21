@@ -41,6 +41,7 @@ class NBUConfig:
     requestTimeoutSeconds: int = 30
     maxRetries: int = 3
     retryBackoffSeconds: int = 2
+    paginationStyle: str = "auto"
 
 
 @dataclass
@@ -165,6 +166,10 @@ class Config:
             raise ValueError("nbu.maxRetries must be >= 0")
         if self.nbu.retryBackoffSeconds < 0:
             raise ValueError("nbu.retryBackoffSeconds must be >= 0")
+        if self.nbu.paginationStyle not in ("auto", "jsonapi", "legacy"):
+            raise ValueError(
+                "nbu.paginationStyle must be one of: auto, jsonapi, legacy"
+            )
         if self.server.shutdownTimeoutSeconds <= 0:
             raise ValueError("server.shutdownTimeoutSeconds must be > 0")
         if not self.collectors.any_enabled():
