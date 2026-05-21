@@ -163,6 +163,42 @@ curl -s localhost:2112/metrics | grep nbu_exporter_scrape_errors_total
 sudo journalctl -u nbu-exporter -n 100 --no-pager
 ```
 
+## Upgrading
+
+The exporter takes care never to clobber the operator's config when a
+new release introduces schema additions.
+
+- `/etc/nbu-exporter/config.yaml` is **never overwritten** by
+  `scripts/deploy.sh`. Your edits survive every upgrade.
+- When the new release ships new config keys, the deploy script writes
+  the latest example to `/etc/nbu-exporter/config.yaml.new` and prints
+  a banner listing which keys are new. Defaults apply for those keys
+  until you merge them.
+- At service start the exporter logs an INFO line for every optional
+  block missing from your config, e.g.
+
+  ```
+  config: nbu.pagination not present in config, using defaults
+    (pageSize=100, maxPages=200, style=jsonapi)
+  ```
+
+  Watch with `sudo journalctl -u nbu-exporter -n 50 --no-pager`.
+
+### Compare and merge new keys
+
+```bash
+# Quick diff between your live config and the latest example
+make config-diff
+
+# Or, after a deploy run that produced config.yaml.new:
+sudo diff -u /etc/nbu-exporter/config.yaml /etc/nbu-exporter/config.yaml.new
+```
+
+Defaults are chosen to be safe across the supported NetBackup versions —
+you only need to add explicit values when you change NBU version (see
+[Compatibility](#compatibility)) or want to tune a knob away from its
+default.
+
 ## Development
 
 ```bash

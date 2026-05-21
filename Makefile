@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 BIN    := $(VENV)/bin
 
-.PHONY: venv install install-dev lint format type test clean check build install-system
+.PHONY: venv install install-dev lint format type test clean check build install-system config-diff
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -34,6 +34,11 @@ build:
 clean:
 	rm -rf $(VENV) build dist *.egg-info .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Show what's new in config.yaml.example compared to the deployed config.
+# Exit status is intentionally 0 even if files differ.
+config-diff:
+	@diff -u /etc/nbu-exporter/config.yaml config.yaml.example || true
 
 install-system: build
 	sudo install -d /opt/nbu-exporter

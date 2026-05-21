@@ -68,6 +68,49 @@ if [ ! -f /etc/nbu-exporter/config.yaml ]; then
     exit 0
 fi
 
+# Detect new config keys added since the operator last wrote
+# /etc/nbu-exporter/config.yaml. Never overwrite the existing file — drop a
+# .new sibling and tell the operator how to compare.
+MISSING_KEYS=$(
+    "$INSTALL_DIR/venv/bin/python" - <<'PYEOF'
+import yaml
+with open("config.yaml.example") as f:
+    example = yaml.safe_load(f) or {}
+with open("/etc/nbu-exporter/config.yaml") as f:
+    current = yaml.safe_load(f) or {}
+
+
+def walk(ex, cur, prefix=""):
+    out = []
+    if isinstance(ex, dict):
+        for k, v in ex.items():
+            key = f"{prefix}.{k}" if prefix else k
+            if not isinstance(cur, dict) or k not in cur:
+                out.append(key)
+            else:
+                out.extend(walk(v, cur[k], key))
+    return out
+
+
+for k in walk(example, current):
+    print(k)
+PYEOF
+)
+
+if [ -n "$MISSING_KEYS" ]; then
+    sudo install -m 0640 -o nbu-exporter -g nbu-exporter \
+        config.yaml.example /etc/nbu-exporter/config.yaml.new
+    echo ""
+    echo "============================================================"
+    echo "NEW CONFIG OPTIONS AVAILABLE in /etc/nbu-exporter/config.yaml.new"
+    echo "Diff: diff /etc/nbu-exporter/config.yaml{,.new}"
+    echo "Defaults will apply until you merge the new options."
+    echo "============================================================"
+    echo "New keys:"
+    echo "$MISSING_KEYS" | sed 's/^/  - /'
+    echo ""
+fi
+
 # Systemd
 sudo install -m 0644 systemd/nbu-exporter.service /etc/systemd/system/nbu-exporter.service
 sudo systemctl daemon-reload

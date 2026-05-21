@@ -18,7 +18,7 @@ from prometheus_client.core import REGISTRY  # noqa: F401  (re-exported for test
 from nbu_exporter import __version__
 from nbu_exporter.client import NBUClient
 from nbu_exporter.collectors import NBUCollector
-from nbu_exporter.config import Config, load_config
+from nbu_exporter.config import Config, load_config, load_config_with_notes
 
 LOGGER = logging.getLogger("nbu_exporter")
 
@@ -210,7 +210,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        cfg = load_config(args.config)
+        cfg, fallback_notes = load_config_with_notes(args.config)
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"failed to load config from {args.config}: {exc}\n")
         return 1
@@ -220,6 +220,8 @@ def cli_main(argv: list[str] | None = None) -> int:
         cfg.server.listenAddress = args.web_listen_address
 
     _configure_logging(cfg.logging.level, cfg.logging.format)
+    for note in fallback_notes:
+        LOGGER.info(note)
 
     client = NBUClient(cfg.nbu)
     collector = NBUCollector(client, cfg)

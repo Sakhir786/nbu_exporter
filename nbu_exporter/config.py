@@ -273,14 +273,69 @@ def _merge_dataclass(target: Any, data: dict[str, Any]) -> None:
             setattr(target, key, value)
 
 
-def load_config(path: str | Path) -> Config:
-    """Load a YAML config file and return a validated Config."""
+def _dotted_present(raw: dict[str, Any], dotted_path: str) -> bool:
+    """Return True iff a dotted-path key exists in a parsed YAML dict."""
+    cur: Any = raw
+    for part in dotted_path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
+# Optional config blocks worth announcing at startup when absent. Each entry
+# is (dotted-path, summary-callable). When a schema change adds a new block
+# users may want to merge into their existing config.yaml, add it here so the
+# fallback shows up in journald — that closes the upgrade-UX loop.
+_OPTIONAL_BLOCKS: list[tuple[str, Any]] = [
+    (
+        "nbu.pagination",
+        lambda c: (
+            f"pageSize={c.nbu.pagination.pageSize}, "
+            f"maxPages={c.nbu.pagination.maxPages}, "
+            f"style={c.nbu.pagination.style}"
+        ),
+    ),
+]
+
+
+def _detect_fallback_notes(raw: dict[str, Any], cfg: Config) -> list[str]:
+    """Return human-readable notes for each optional block that fell back."""
+    notes: list[str] = []
+    for path, summary in _OPTIONAL_BLOCKS:
+        if not _dotted_present(raw, path):
+            notes.append(
+                f"config: {path} not present in config, using defaults ({summary(cfg)})"
+            )
+    return notes
+
+
+def _read_yaml(path: str | Path) -> dict[str, Any]:
     p = Path(path)
     with p.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping in {path}")
+    return raw
+
+
+def load_config(path: str | Path) -> Config:
+    """Load a YAML config file and return a validated Config."""
+    raw = _read_yaml(path)
     cfg = Config()
     _merge_dataclass(cfg, raw)
     cfg.validate()
     return cfg
+
+
+def load_config_with_notes(path: str | Path) -> tuple[Config, list[str]]:
+    """Load a config file and also return fallback-notes for the operator.
+
+    The returned list is suitable for emitting at INFO level after logging
+    has been configured — one entry per optional block absent from the YAML.
+    """
+    raw = _read_yaml(path)
+    cfg = Config()
+    _merge_dataclass(cfg, raw)
+    cfg.validate()
+    return cfg, _detect_fallback_notes(raw, cfg)

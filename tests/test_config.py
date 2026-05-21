@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nbu_exporter.config import Config, load_config
+from nbu_exporter.config import Config, load_config, load_config_with_notes
 
 
 def _write(tmp_path: Path, body: str) -> Path:
@@ -134,6 +134,25 @@ collectors:
         cfg.collectors.clients.pageSize, cfg.collectors.clients.maxPages
     )
     assert (ps2, mp2, style2) == (100, 200, "jsonapi")
+
+
+def test_load_config_with_notes_reports_missing_pagination_block(tmp_path: Path) -> None:
+    """nbu.pagination missing from YAML triggers an operator-visible note."""
+    cfg, notes = load_config_with_notes(_write(tmp_path, VALID))
+    assert any("nbu.pagination" in n for n in notes), notes
+    note = next(n for n in notes if "nbu.pagination" in n)
+    assert "pageSize=100" in note
+    assert "style=jsonapi" in note
+
+
+def test_load_config_with_notes_silent_when_pagination_present(tmp_path: Path) -> None:
+    """When nbu.pagination is explicit, no fallback note is emitted."""
+    body = (
+        'nbu:\n  host: h\n  apiKey: k\n  apiVersion: "3.0"\n'
+        "  pagination:\n    pageSize: 500\n    maxPages: 200\n    style: jsonapi\n"
+    )
+    _, notes = load_config_with_notes(_write(tmp_path, body))
+    assert not any("nbu.pagination" in n for n in notes), notes
 
 
 def test_resolve_pagination_uses_legacy_for_nbu_8_or_9(tmp_path: Path) -> None:
