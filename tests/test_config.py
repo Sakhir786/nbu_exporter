@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from nbu_exporter.config import Config, load_config, load_config_with_notes
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+EXAMPLE_CONFIG = REPO_ROOT / "config.yaml.example"
 
 
 def _write(tmp_path: Path, body: str) -> Path:
@@ -189,3 +195,56 @@ def test_resolve_pagination_uses_legacy_for_nbu_8_or_9(tmp_path: Path) -> None:
     cfg = load_config(_write(tmp_path, body))
     _, _, style = cfg.resolve_pagination(None, None)
     assert style == "legacy"
+
+
+# --------------------------------------------------------------------------- #
+# config.yaml.example completeness — locks the shipped example to the schema
+# so a new dataclass field cannot land without being documented.
+# --------------------------------------------------------------------------- #
+
+
+def _walk_dataclass_paths(obj: Any, prefix: str = "") -> list[str]:
+    out: list[str] = []
+    for fld in dataclasses.fields(obj):
+        path = f"{prefix}.{fld.name}" if prefix else fld.name
+        val = getattr(obj, fld.name)
+        if dataclasses.is_dataclass(val):
+            out.extend(_walk_dataclass_paths(val, path))
+        else:
+            out.append(path)
+    return out
+
+
+def _dotted_present(d: Any, dotted: str) -> bool:
+    cur: Any = d
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
+def test_example_config_covers_every_dataclass_field() -> None:
+    """Every Config dataclass field must appear in config.yaml.example."""
+    with EXAMPLE_CONFIG.open() as fh:
+        example = yaml.safe_load(fh)
+    missing = [
+        p for p in _walk_dataclass_paths(Config()) if not _dotted_present(example, p)
+    ]
+    assert not missing, (
+        "config.yaml.example is missing these keys (add them with explanatory "
+        f"comments so operators see every available knob): {missing}"
+    )
+
+
+def test_example_config_parses_and_validates(tmp_path: Path) -> None:
+    """The shipped example, with placeholders replaced, must load cleanly."""
+    raw = EXAMPLE_CONFIG.read_text()
+    patched = raw.replace("REPLACE_WITH_NBU_API_KEY", "real-api-key").replace(
+        "nbu-master.example.com", "nbu.real.example.com"
+    )
+    path = tmp_path / "config.yaml"
+    path.write_text(patched)
+    cfg = load_config(path)
+    assert cfg.nbu.host == "nbu.real.example.com"
+    assert cfg.nbu.apiKey == "real-api-key"

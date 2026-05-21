@@ -1,110 +1,154 @@
-# NBU Exporter configuration.
+# =============================================================================
+# NBU Exporter configuration  —  every option exposed, defaults explained.
+#
 # Copy to /etc/nbu-exporter/config.yaml and edit for your environment.
+# Two values are REQUIRED before the service will start:
+#     nbu.host        — FQDN of your NetBackup master
+#     nbu.apiKey      — REST API key from the NBU Web UI (Security → API Keys)
+#
+# Everything else has a working default. Anything labelled "inherit" or
+# "(optional)" may be left as null / commented and the exporter will fall
+# back to a sensible value.
+# =============================================================================
 
-# HTTP server settings for the exporter itself
+
+# ----- HTTP server settings for the exporter itself --------------------------
 server:
-  listenAddress: "0.0.0.0:2112"
-  shutdownTimeoutSeconds: 10
+  listenAddress: "0.0.0.0:2112"   # host:port to bind /metrics on
+  shutdownTimeoutSeconds: 10      # grace period on SIGTERM
 
-# Logging
+
+# ----- Logging ----------------------------------------------------------------
 logging:
-  level: info           # debug, info, warning, error
-  format: text          # text or json
+  level: info                     # debug | info | warning | error
+  format: text                    # text | json (json = one JSON line per record)
 
-# NetBackup master API connection
+
+# ----- NetBackup master REST API connection ----------------------------------
 nbu:
   scheme: https
-  host: nbu-master.example.com
+  host: nbu-master.example.com    # REQUIRED — your NBU master FQDN/IP
   port: 1556
   basePath: /netbackup
-  apiVersion: "3.0"
+  apiVersion: "3.0"               # see Compatibility table in README
   contentType: "application/vnd.netbackup+json;version=3.0"
-  apiKey: "REPLACE_WITH_NBU_API_KEY"
-  insecureSkipVerify: false
-  caCertFile: ""        # optional path to a CA bundle if NBU uses self-signed certs
+  apiKey: "REPLACE_WITH_NBU_API_KEY"   # REQUIRED
+  insecureSkipVerify: false       # true ONLY for lab use with self-signed certs
+  caCertFile: ""                  # optional path to a CA bundle
   requestTimeoutSeconds: 30
-  maxRetries: 3
-  retryBackoffSeconds: 2
+  maxRetries: 3                   # for 5xx / 429 / connection errors
+  retryBackoffSeconds: 2          # exponential backoff factor
 
-  # Pagination defaults applied to every NBU REST endpoint.
-  # Individual collectors below may override pageSize / maxPages.
+  # ----- Pagination defaults --------------------------------------------------
+  # Applied to every NBU REST endpoint. Per-collector blocks below may
+  # override pageSize / maxPages individually (leave null to inherit).
   #
-  # See README "Compatibility" for the NBU-version → values matrix:
+  # NBU-version → values matrix (see README "Compatibility"):
   #   NBU 8.x / 9.x         → pageSize 100, style legacy
   #   NBU 10.0              → pageSize 100, style jsonapi
-  #   NBU 10.1-10.4         → pageSize 500, style jsonapi
+  #   NBU 10.1 – 10.4       → pageSize 500, style jsonapi
   #   NBU 10.5 / 11.x+      → pageSize 500+, style jsonapi
   pagination:
-    pageSize: 100         # records per page (NBU 10.0 caps at 100, 10.1+ allows 500+)
-    maxPages: 200         # safety cap on the pagination walk
-    style: jsonapi        # "jsonapi" (page[limit]/page[offset]) or "legacy" (limit/offset)
+    pageSize: 100                 # records per page
+    maxPages: 200                 # safety cap on pagination walk
+    style: jsonapi                # jsonapi (page[limit]/page[offset]) | legacy (limit/offset)
 
-# Collector toggles and per-collector tuning.
-# Set enabled: false on any collector to disable it without affecting others.
-# Each collector may also override pageSize / maxPages individually; values
-# left unset (or null) inherit nbu.pagination above.
+
+# =============================================================================
+# Collectors
+# Set enabled: false on any block to disable that collector.
+# Each collector may override pageSize / maxPages; null = inherit nbu.pagination.
+# =============================================================================
 collectors:
+
+  # ----- Always-on signals -----
   health:
-    enabled: true       # nbu_up, nbu_api_version, scrape signals — keep enabled
+    enabled: true                 # emits nbu_up, nbu_api_version, scrape signals
+
+  # ----- Jobs (/admin/jobs) -----
+  # The workhorse — its result is shared with job-states, per-policy,
+  # per-client and catalog collectors via a TTL cache.
   jobs:
     enabled: true
-    lookbackHours: 24
-    cacheTTLSeconds: 60 # jobs result is shared with job_states, clients, policies, catalog
-    # pageSize: 500     # override nbu.pagination.pageSize for /admin/jobs only
-    # maxPages: 400
+    lookbackHours: 24             # how far back to fetch jobs
+    cacheTTLSeconds: 60           # share window across dependent collectors
+    pageSize: null                # (optional) inherit nbu.pagination.pageSize
+    maxPages: null                # (optional) inherit nbu.pagination.maxPages
+
+  # ----- Job states roll-up -----
   jobStates:
-    enabled: true
+    enabled: true                 # emits nbu_jobs_by_state
+
+  # ----- Clients (/config/hosts) -----
+  # /config/hosts shape differs between NBU versions and some versions
+  # reject server-side OData filters (HTTP 400 / errorCode 133). The
+  # exporter always fetches every host and filters client-side.
+  #
+  # NBU version → required values:
+  #   NBU 10.0      hostsResponseKey: hosts   hostTypeField: nbuHostType
+  #   NBU 10.1+     hostsResponseKey: data    hostTypeField: hostType  (verify)
   clients:
     enabled: true
-    cacheTTLSeconds: 300  # 5 minutes — client inventory changes infrequently
-    # pageSize: 200
-    # maxPages: 100
-    # /config/hosts shape differs between NBU versions. Pick the row
-    # that matches your master, or leave defaults (NBU 10.0).
-    #
-    #   NBU 10.0     hostsResponseKey: hosts  hostTypeField: nbuHostType
-    #   NBU 10.1+    hostsResponseKey: data   hostTypeField: hostType (verify)
-    #
-    # /config/hosts on some versions rejects server-side OData filters
-    # (HTTP 400, errorCode 133). The exporter always fetches every host
-    # and filters client-side using clientHostTypeValues below.
+    cacheTTLSeconds: 300          # 5 min — client inventory changes infrequently
+    pageSize: null                # (optional) inherit nbu.pagination.pageSize
+    maxPages: null                # (optional) inherit nbu.pagination.maxPages
     hostsEndpoint: "/config/hosts"
-    hostsResponseKey: hosts
-    hostTypeField: nbuHostType
-    # Values to treat as "client" (case-insensitive). NBU reports things
-    # like CLIENT, PRIMARY_SERVER, MEDIA_SERVER, VIRTUAL_CLIENT — add
-    # more entries if your environment needs them counted as clients.
-    clientHostTypeValues:
-      - CLIENT
+    hostsResponseKey: hosts       # JSON envelope key holding the host array
+    hostTypeField: nbuHostType    # field on each host whose value identifies role
+    clientHostTypeValues:         # case-insensitive — add more if you want them
+      - CLIENT                    # counted as clients in nbu_client_info
+      # - VIRTUAL_CLIENT
+      # - MEDIA_SERVER
+
+  # ----- Policies (/config/policies) -----
   policies:
     enabled: true
-    cacheTTLSeconds: 600  # 10 minutes
+    cacheTTLSeconds: 600          # 10 min
+    pageSize: null                # (optional)
+    maxPages: null                # (optional)
+
+  # ----- Storage units (/storage/storage-units) -----
   storageUnits:
     enabled: true
     cacheTTLSeconds: 300
-    # Storage units whose `type` matches this regex are treated as "cloud" — for these,
-    # the NBU API returns int64-max as free bytes, which would break % Used calcs.
-    # The exporter still emits used bytes for these; the regex only marks them so
-    # downstream alerts/dashboards can filter.
+    pageSize: null                # (optional)
+    maxPages: null                # (optional)
+    # Storage units whose `type` matches this regex are treated as "cloud":
+    # for those, the NBU API reports int64-max as free bytes which would break
+    # % Used calculations. The exporter still emits used bytes for cloud STUs;
+    # the regex only marks them so dashboards/alerts can filter on type.
     cloudTypePattern: "^(amazon|wasabi|azure|gcp|google).*"
+
+  # ----- Disk pools (/storage/disk-pools) -----
   diskPools:
     enabled: true
     cacheTTLSeconds: 300
-    # Numeric state codes reported by the API that we consider "UP".
-    # Default covers known values; adjust if your NBU version reports differently.
+    pageSize: null                # (optional)
+    maxPages: null                # (optional)
+    # Numeric state codes considered UP. Adjust if your NBU version reports
+    # differently — `nbu_disk_pool_state` is always emitted with the raw value.
     upStateValues: [2, 1]
+
+  # ----- Storage servers (/storage/storage-servers) -----
   storageServers:
     enabled: true
     cacheTTLSeconds: 300
+    pageSize: null                # (optional)
+    maxPages: null                # (optional)
+
+  # ----- MSDP (derived from disk-pools cache) -----
   msdp:
     enabled: true
-    cacheTTLSeconds: 300
-    # Server-type strings (as returned by the disk-pools API) that identify
+    cacheTTLSeconds: 300          # not used directly; piggybacks on diskPools cache
+    # Server-type strings (as returned by /storage/disk-pools) that identify
     # MSDP/PureDisk pools eligible for dedup metrics.
     serverTypePattern: "(?i)(msdp|puredisk)"
+
+  # ----- Catalog backups (derived from jobs cache) -----
   catalog:
     enabled: true
-    cacheTTLSeconds: 600
-    # Policy types that represent catalog backups (varies by NBU version).
+    cacheTTLSeconds: 600          # not used directly; piggybacks on jobs cache
+    # Policy-type values reported by /admin/jobs that represent catalog jobs.
+    # Varies by NBU version — add entries if your master uses a different name.
     policyTypeValues:
       - "NBU-Catalog"
