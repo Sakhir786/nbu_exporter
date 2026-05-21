@@ -131,6 +131,55 @@ def test_legacy_pagination_walks_multiple_pages() -> None:
         assert second.qs.get("offset") == ["2"]
 
 
+def test_get_all_reads_alternate_response_envelope() -> None:
+    """get_all must honour a non-default data_key like NBU 10.0 ``hosts``."""
+    client = NBUClient(_cfg())
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://nbu.example:1556/netbackup/config/hosts",
+            [
+                {"json": {"hosts": [{"name": "a"}, {"name": "b"}]}},
+                {"json": {"hosts": [{"name": "c"}]}},
+            ],
+        )
+        out = client.get_all(
+            "/config/hosts",
+            page_size=2,
+            max_pages=10,
+            style="jsonapi",
+            data_key="hosts",
+        )
+    assert [r["name"] for r in out] == ["a", "b", "c"]
+
+
+def test_get_all_default_data_key_is_data() -> None:
+    """The default key remains ``data`` so existing callers are unchanged."""
+    client = NBUClient(_cfg())
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://nbu.example:1556/netbackup/x",
+            json={"data": [{"id": "1"}]},
+        )
+        out = client.get_all("/x", page_size=10, max_pages=1, style="jsonapi")
+    assert [r["id"] for r in out] == ["1"]
+
+
+def test_get_all_warns_when_data_key_missing(caplog: pytest.LogCaptureFixture) -> None:
+    """Missing envelope key logs a warning that names the expected key."""
+    client = NBUClient(_cfg())
+    caplog.set_level(logging.WARNING, logger="nbu_exporter.client")
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://nbu.example:1556/netbackup/x",
+            json={"oops": []},
+        )
+        out = client.get_all(
+            "/x", page_size=10, max_pages=1, style="jsonapi", data_key="hosts"
+        )
+    assert out == []
+    assert any("'hosts'" in rec.message for rec in caplog.records)
+
+
 def test_api_key_not_in_describe_url() -> None:
     cfg = _cfg()
     client = NBUClient(cfg)

@@ -10,6 +10,7 @@ from prometheus_client.metrics_core import Metric
 
 from nbu_exporter.collectors import (
     CatalogCollector,
+    ClientsCollector,
     DiskPoolsCollector,
     JobsCollector,
     MSDPCollector,
@@ -260,3 +261,108 @@ def test_cloud_pattern_is_anchored() -> None:
     assert pattern.match("azure_blob")
     assert pattern.match("gcp_storage")
     assert not pattern.match("BasicDisk")
+
+
+# --------------------------------------------------------------------------- #
+# ClientsCollector — NBU /config/hosts shape and filtering
+# --------------------------------------------------------------------------- #
+
+
+def _build_clients_collector(
+    cfg: Config, hosts: list[dict[str, Any]]
+) -> ClientsCollector:
+    client = MagicMock()
+    client.get_all.return_value = hosts
+    return ClientsCollector(client, cfg)
+
+
+def test_clients_uses_configured_response_key() -> None:
+    """ClientsCollector must pass hostsResponseKey through to get_all()."""
+    cfg = Config()
+    cfg.collectors.clients.hostsEndpoint = "/config/hosts"
+    cfg.collectors.clients.hostsResponseKey = "hosts"
+    client = MagicMock()
+    client.get_all.return_value = []
+    sub = ClientsCollector(client, cfg)
+    list(sub.collect(MagicMock()))  # triggers _fetch via cache
+    _, kwargs = client.get_all.call_args
+    assert kwargs["data_key"] == "hosts"
+    assert client.get_all.call_args[0][0] == "/config/hosts"
+    # No server-side filter must be sent.
+    assert kwargs.get("params") is None
+
+
+def test_clients_alternate_response_key_data() -> None:
+    """An NBU 10.1+ master returning {"data": [...]} works once configured."""
+    cfg = Config()
+    cfg.collectors.clients.hostsResponseKey = "data"
+    cfg.collectors.clients.hostTypeField = "hostType"
+    client = MagicMock()
+    client.get_all.return_value = []
+    sub = ClientsCollector(client, cfg)
+    list(sub.collect(MagicMock()))
+    _, kwargs = client.get_all.call_args
+    assert kwargs["data_key"] == "data"
+
+
+def test_clients_filter_excludes_non_client_host_types() -> None:
+    """Mixed-role host list — only CLIENT entries are emitted."""
+    cfg = Config()
+    hosts = [
+        {"name": "primary-a", "nbuHostType": "PRIMARY_SERVER", "hardware": "x", "os": "RHEL"},
+        {"name": "media-b", "nbuHostType": "MEDIA_SERVER", "hardware": "y", "os": "RHEL"},
+        {"name": "client-1", "nbuHostType": "CLIENT", "hardware": "vm", "os": "Linux"},
+        {"name": "client-2", "nbuHostType": "client", "hardware": "vm", "os": "Linux"},
+    ]
+    sub = _build_clients_collector(cfg, hosts)
+    metrics = list(sub.collect(MagicMock()))
+    info = _find(metrics, "nbu_client_info")
+    names = {s.labels["client"] for s in info.samples}
+    assert names == {"client-1", "client-2"}, names
+
+
+def test_clients_filter_is_case_insensitive() -> None:
+    """Match is case-insensitive against clientHostTypeValues."""
+    cfg = Config()
+    cfg.collectors.clients.clientHostTypeValues = ["Client"]
+    hosts = [
+        {"name": "c-up", "nbuHostType": "CLIENT"},
+        {"name": "c-low", "nbuHostType": "client"},
+        {"name": "c-mix", "nbuHostType": "ClIeNt"},
+    ]
+    sub = _build_clients_collector(cfg, hosts)
+    metrics = list(sub.collect(MagicMock()))
+    info = _find(metrics, "nbu_client_info")
+    assert {s.labels["client"] for s in info.samples} == {"c-up", "c-low", "c-mix"}
+
+
+def test_clients_respects_custom_host_type_values() -> None:
+    """Counting media servers as clients is one config edit."""
+    cfg = Config()
+    cfg.collectors.clients.clientHostTypeValues = ["CLIENT", "VIRTUAL_CLIENT", "MEDIA_SERVER"]
+    hosts = [
+        {"name": "media-a", "nbuHostType": "MEDIA_SERVER"},
+        {"name": "primary-b", "nbuHostType": "PRIMARY_SERVER"},
+        {"name": "vc-c", "nbuHostType": "VIRTUAL_CLIENT"},
+        {"name": "client-d", "nbuHostType": "CLIENT"},
+    ]
+    sub = _build_clients_collector(cfg, hosts)
+    metrics = list(sub.collect(MagicMock()))
+    info = _find(metrics, "nbu_client_info")
+    names = {s.labels["client"] for s in info.samples}
+    assert names == {"media-a", "vc-c", "client-d"}, names
+
+
+def test_clients_uses_configured_host_type_field() -> None:
+    """Switching the field name from nbuHostType to hostType works."""
+    cfg = Config()
+    cfg.collectors.clients.hostTypeField = "hostType"
+    hosts = [
+        {"name": "x", "hostType": "CLIENT"},
+        {"name": "y", "nbuHostType": "CLIENT"},  # wrong field for this config
+    ]
+    sub = _build_clients_collector(cfg, hosts)
+    metrics = list(sub.collect(MagicMock()))
+    info = _find(metrics, "nbu_client_info")
+    names = {s.labels["client"] for s in info.samples}
+    assert names == {"x"}, names

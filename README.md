@@ -69,6 +69,10 @@ All settings live in `/etc/nbu-exporter/config.yaml`. See
 | `collectors.diskPools.upStateValues` | `[2, 1]` | Numeric states considered UP |
 | `collectors.msdp.serverTypePattern` | `(?i)(msdp\|puredisk)` | Server types eligible for MSDP metrics |
 | `collectors.catalog.policyTypeValues` | `["NBU-Catalog"]` | Policy types representing catalog backups |
+| `collectors.clients.hostsEndpoint` | `/config/hosts` | NBU REST path to enumerate hosts |
+| `collectors.clients.hostsResponseKey` | `hosts` | JSON envelope key holding the host array — see [Clients collector](#clients-collector) |
+| `collectors.clients.hostTypeField` | `nbuHostType` | Field on each host whose value identifies the role |
+| `collectors.clients.clientHostTypeValues` | `["CLIENT"]` | Case-insensitive values to treat as a client |
 
 ## Metrics
 
@@ -240,6 +244,37 @@ nbu:
 Per-collector overrides (`collectors.<name>.pageSize`,
 `collectors.<name>.maxPages`) are honoured; values left unset inherit
 `nbu.pagination`.
+
+### Clients collector
+
+The `/config/hosts` endpoint changed shape between NBU releases and some
+versions reject server-side OData filters with HTTP 400 + errorCode 133.
+To keep the exporter version-agnostic, response-envelope key, role
+field, and the set of "client" role values are all config knobs:
+
+| NBU version | `hostsResponseKey` | `hostTypeField` | Notes |
+|-------------|--------------------|-----------------|-------|
+| 10.0        | `hosts`            | `nbuHostType`   | Default. Server-side filter rejected. |
+| 10.1+       | `data`             | `hostType`      | Verify with `curl` against your master. |
+
+Example config block:
+
+```yaml
+collectors:
+  clients:
+    hostsEndpoint: "/config/hosts"
+    hostsResponseKey: hosts             # NBU 10.0 envelope
+    hostTypeField: nbuHostType
+    clientHostTypeValues:               # case-insensitive
+      - CLIENT
+      # - VIRTUAL_CLIENT
+      # - MEDIA_SERVER  # if you want media servers counted as clients
+```
+
+Filtering happens client-side. Add or remove entries in
+`clientHostTypeValues` to control which roles show up in
+`nbu_client_info`; the exporter never tries to push that decision
+back to the master.
 
 ## License
 

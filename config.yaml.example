@@ -59,6 +59,23 @@ collectors:
     cacheTTLSeconds: 300  # 5 minutes — client inventory changes infrequently
     # pageSize: 200
     # maxPages: 100
+    # /config/hosts shape differs between NBU versions. Pick the row
+    # that matches your master, or leave defaults (NBU 10.0).
+    #
+    #   NBU 10.0     hostsResponseKey: hosts  hostTypeField: nbuHostType
+    #   NBU 10.1+    hostsResponseKey: data   hostTypeField: hostType (verify)
+    #
+    # /config/hosts on some versions rejects server-side OData filters
+    # (HTTP 400, errorCode 133). The exporter always fetches every host
+    # and filters client-side using clientHostTypeValues below.
+    hostsEndpoint: "/config/hosts"
+    hostsResponseKey: hosts
+    hostTypeField: nbuHostType
+    # Values to treat as "client" (case-insensitive). NBU reports things
+    # like CLIENT, PRIMARY_SERVER, MEDIA_SERVER, VIRTUAL_CLIENT — add
+    # more entries if your environment needs them counted as clients.
+    clientHostTypeValues:
+      - CLIENT
   policies:
     enabled: true
     cacheTTLSeconds: 600  # 10 minutes

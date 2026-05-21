@@ -296,29 +296,39 @@ class ClientsCollector:
         self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
             cfg.collectors.clients.pageSize, cfg.collectors.clients.maxPages
         )
+        # Pre-lower for case-insensitive comparisons inside collect().
+        self._wanted_types = {v.lower() for v in self._cfg.clientHostTypeValues}
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
             ttl_seconds=cfg.collectors.clients.cacheTTLSeconds,
             fetcher=self._fetch,
         )
 
     def _fetch(self) -> list[dict[str, Any]]:
+        # No server-side filter — /config/hosts on NBU 10.0 rejects OData
+        # `filter=` with HTTP 400 + errorCode 133. We fetch every host and
+        # filter in collect() using the configured field/value list.
         return self._client.get_all(
-            "/config/hosts",
-            params={"filter": "hostType eq 'CLIENT'"},
+            self._cfg.hostsEndpoint,
+            params=None,
             page_size=self._page_size,
             max_pages=self._max_pages,
             style=self._style,
+            data_key=self._cfg.hostsResponseKey,
         )
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
-        clients = self.cache.get()
+        hosts = self.cache.get()
         info = GaugeMetricFamily(
             "nbu_client_info",
             "NetBackup client inventory; constant 1, labels carry metadata.",
             labels=["client", "hardware", "os"],
         )
-        for entry in clients:
+        field_name = self._cfg.hostTypeField
+        for entry in hosts:
             attrs = _job_attrs(entry)
+            host_type = _as_str(attrs.get(field_name)).lower()
+            if host_type not in self._wanted_types:
+                continue
             name = _as_str(attrs.get("name") or attrs.get("hostName"))
             if not name:
                 continue

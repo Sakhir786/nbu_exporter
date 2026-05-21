@@ -85,6 +85,16 @@ class ClientsCollectorConfig:
     cacheTTLSeconds: int = 300
     pageSize: int | None = None
     maxPages: int | None = None
+    # /config/hosts endpoint shape differs across NBU versions.
+    # NBU 10.0 returns {"hosts": [...]} with hostType in "nbuHostType".
+    # NBU 10.1+ may return JSON:API-style {"data": [...]} with "hostType".
+    # We never filter server-side: some endpoints reject OData `filter=`
+    # with HTTP 400 / errorCode 133. Filter client-side from the values
+    # below (case-insensitive match against hostTypeField).
+    hostsEndpoint: str = "/config/hosts"
+    hostsResponseKey: str = "hosts"
+    hostTypeField: str = "nbuHostType"
+    clientHostTypeValues: list[str] = field(default_factory=lambda: ["CLIENT"])
 
 
 @dataclass
@@ -234,6 +244,16 @@ class Config:
 
         if self.collectors.jobs.lookbackHours <= 0:
             raise ValueError("collectors.jobs.lookbackHours must be > 0")
+
+        c = self.collectors.clients
+        if not c.hostsEndpoint:
+            raise ValueError("collectors.clients.hostsEndpoint must not be empty")
+        if not c.hostsResponseKey:
+            raise ValueError("collectors.clients.hostsResponseKey must not be empty")
+        if not c.hostTypeField:
+            raise ValueError("collectors.clients.hostTypeField must not be empty")
+        if not c.clientHostTypeValues:
+            raise ValueError("collectors.clients.clientHostTypeValues must not be empty")
 
         for name, page_size, max_pages in (
             ("jobs", self.collectors.jobs.pageSize, self.collectors.jobs.maxPages),

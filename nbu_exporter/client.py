@@ -115,11 +115,15 @@ class NBUClient:
         page_size: int,
         max_pages: int,
         style: str,
+        data_key: str = "data",
     ) -> list[dict[str, Any]]:
-        """Walk paginated results and return every ``data`` record.
+        """Walk paginated results and return every record under ``data_key``.
 
         Pagination query parameters are dictated entirely by ``style``,
-        ``page_size`` and ``max_pages`` — nothing is hardcoded.
+        ``page_size`` and ``max_pages``. The response envelope key holding
+        the per-page list is ``data_key`` — defaults to JSON:API ``"data"``
+        but some NBU endpoints use a different key (e.g. ``/config/hosts``
+        returns ``{"hosts": [...]}``).
         """
         if style not in PAGINATION_STYLES:
             raise ValueError(f"unknown pagination style: {style!r}")
@@ -131,9 +135,14 @@ class NBUClient:
             page_params = dict(params)
             page_params.update(self._page_params(style, page_size, offset))
             payload = self.get(path, params=page_params)
-            page_data = payload.get("data")
+            page_data = payload.get(data_key)
             if not isinstance(page_data, list):
-                LOGGER.warning("response from %s has no list `data` field", path)
+                LOGGER.warning(
+                    "response from %s has no list %r field (keys=%s)",
+                    path,
+                    data_key,
+                    list(payload.keys()),
+                )
                 break
             out.extend(page_data)
             pages += 1
@@ -148,12 +157,13 @@ class NBUClient:
                 break
             offset += page_size
         LOGGER.debug(
-            "get_all %s fetched %d records over %d pages (style=%s, pageSize=%d)",
+            "get_all %s fetched %d records over %d pages (style=%s, pageSize=%d, key=%s)",
             path,
             len(out),
             pages,
             style,
             page_size,
+            data_key,
         )
         return out
 

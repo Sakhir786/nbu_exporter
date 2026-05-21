@@ -136,6 +136,32 @@ collectors:
     assert (ps2, mp2, style2) == (100, 200, "jsonapi")
 
 
+def test_clients_block_validation(tmp_path: Path) -> None:
+    """Empty client-collector knobs are rejected by validate()."""
+    for key in (
+        "hostsEndpoint",
+        "hostsResponseKey",
+        "hostTypeField",
+    ):
+        body = VALID + f"collectors:\n  clients:\n    {key}: ''\n"
+        with pytest.raises(ValueError, match=f"clients.{key}"):
+            load_config(_write(tmp_path, body))
+
+    body = VALID + "collectors:\n  clients:\n    clientHostTypeValues: []\n"
+    with pytest.raises(ValueError, match="clients.clientHostTypeValues"):
+        load_config(_write(tmp_path, body))
+
+
+def test_clients_defaults_for_nbu_10_0(tmp_path: Path) -> None:
+    """Out-of-the-box defaults match NBU 10.0's /config/hosts shape."""
+    cfg = load_config(_write(tmp_path, VALID))
+    c = cfg.collectors.clients
+    assert c.hostsEndpoint == "/config/hosts"
+    assert c.hostsResponseKey == "hosts"
+    assert c.hostTypeField == "nbuHostType"
+    assert c.clientHostTypeValues == ["CLIENT"]
+
+
 def test_load_config_with_notes_reports_missing_pagination_block(tmp_path: Path) -> None:
     """nbu.pagination missing from YAML triggers an operator-visible note."""
     cfg, notes = load_config_with_notes(_write(tmp_path, VALID))
