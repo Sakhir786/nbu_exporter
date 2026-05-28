@@ -102,7 +102,7 @@ collectors:
 
   # ----- Policies (/config/policies) -----
   policies:
-    enabled: true
+    enabled: false
     cacheTTLSeconds: 600          # 10 min
     pageSize: null                # (optional)
     maxPages: null                # (optional)
