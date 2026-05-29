@@ -72,6 +72,10 @@ class JobsCollectorConfig:
     cacheTTLSeconds: int = 60
     pageSize: int | None = None  # inherit nbu.pagination.pageSize
     maxPages: int | None = None  # inherit nbu.pagination.maxPages
+    # v0.4.2 — per-job metric emission. ON by default; flip off if the
+    # operator's Prometheus is tight on series budget.
+    emitFailedJobs: bool = True
+    emitActiveJobs: bool = True
 
 
 @dataclass

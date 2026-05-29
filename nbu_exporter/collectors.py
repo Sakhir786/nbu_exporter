@@ -87,6 +87,19 @@ def _parse_iso(ts: Any) -> float:
         return 0.0
 
 
+def _parse_elapsed(raw: Any) -> float:
+    """Parse NBU's ``HH:MM:SS`` elapsed-time string to seconds; 0.0 on failure."""
+    if not raw or not isinstance(raw, str) or ":" not in raw:
+        return 0.0
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return 0.0
+    try:
+        return float(int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 @dataclass
 class ScrapeState:
     """Per-scrape mutable state shared across sub-collectors."""
@@ -123,6 +136,8 @@ class JobsCollector:
         self._states_enabled = cfg.collectors.jobStates.enabled
         self._policy_jobs_enabled = cfg.collectors.policies.enabled
         self._client_jobs_enabled = cfg.collectors.clients.enabled
+        self._emit_failed = cfg.collectors.jobs.emitFailedJobs
+        self._emit_active = cfg.collectors.jobs.emitActiveJobs
         self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
             cfg.collectors.jobs.pageSize, cfg.collectors.jobs.maxPages
         )
@@ -280,6 +295,192 @@ class JobsCollector:
                 )
             yield nbu_client_last_success
             yield nbu_client_last_status
+
+        # -------------------------------------------------------------------- #
+        # Per-job series (v0.4.2) — additive, OFF-switchable via config.
+        # Walks the same jobs list a second time; no extra API calls.
+        # -------------------------------------------------------------------- #
+        nbu_job_failed = GaugeMetricFamily(
+            "nbu_job_failed",
+            "Constant 1 for each failed NBU job in the lookback window. "
+            "Labels carry per-job identity; status label carries the exit code.",
+            labels=[
+                "job_id",
+                "client",
+                "policy",
+                "policy_type",
+                "schedule",
+                "storage_unit",
+                "media_server",
+                "status",
+                "job_owner",
+                "job_type",
+                "sub_type",
+            ],
+        )
+        nbu_job_failed_kilobytes = GaugeMetricFamily(
+            "nbu_job_failed_kilobytes",
+            "Kilobytes transferred by failed NBU jobs.",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_failed_started = GaugeMetricFamily(
+            "nbu_job_failed_started_timestamp",
+            "Unix start time of failed NBU jobs. Use with Grafana $__from/$__to "
+            "for time filtering.",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_failed_ended = GaugeMetricFamily(
+            "nbu_job_failed_ended_timestamp",
+            "Unix end time of failed NBU jobs. 0 when NBU reports the 1970 epoch "
+            "(no end time recorded).",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_failed_elapsed = GaugeMetricFamily(
+            "nbu_job_failed_elapsed_seconds",
+            "Elapsed runtime of failed NBU jobs in seconds, parsed from NBU's "
+            "HH:MM:SS elapsedTime field.",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+
+        nbu_job_active = GaugeMetricFamily(
+            "nbu_job_active",
+            "Constant 1 for each currently-active NBU job (state == ACTIVE).",
+            labels=[
+                "job_id",
+                "client",
+                "policy",
+                "policy_type",
+                "schedule",
+                "storage_unit",
+                "media_server",
+                "job_owner",
+                "job_type",
+                "sub_type",
+            ],
+        )
+        nbu_job_active_percent = GaugeMetricFamily(
+            "nbu_job_active_percent_complete",
+            "Completion percentage of active NBU jobs (0-100).",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_active_kbytes = GaugeMetricFamily(
+            "nbu_job_active_kilobytes_transferred",
+            "Kilobytes transferred so far by active NBU jobs.",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_active_started = GaugeMetricFamily(
+            "nbu_job_active_started_timestamp",
+            "Unix start time of active NBU jobs.",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+        nbu_job_active_rate = GaugeMetricFamily(
+            "nbu_job_active_transfer_rate",
+            "Current transfer rate of active NBU jobs (KB/s as reported by NBU).",
+            labels=["job_id", "client", "policy", "schedule"],
+        )
+
+        if self._emit_failed or self._emit_active:
+            for job in jobs:
+                attrs = _job_attrs(job)
+                job_id = _as_str(attrs.get("jobId"))
+                if not job_id:
+                    continue
+                status_int = _as_int(attrs.get("status"))
+                state_str = _as_str(attrs.get("state"))
+
+                # NBU returns " " for empty fields on QUEUED/early-stage jobs.
+                client = _as_str(attrs.get("clientName")).strip()
+                policy = _as_str(attrs.get("policyName")).strip()
+                policy_type = _as_str(attrs.get("policyType")).strip()
+                schedule = _as_str(attrs.get("scheduleName")).strip()
+                storage_unit = _as_str(attrs.get("destinationStorageUnitName")).strip()
+                media_server = _as_str(attrs.get("destinationMediaServerName")).strip()
+                job_owner = _as_str(attrs.get("jobOwner")).strip()
+                job_type = _as_str(attrs.get("jobType")).strip()
+                sub_type = _as_str(attrs.get("jobSubType")).strip()
+
+                kb = _as_float(attrs.get("kilobytesTransferred"))
+                start_ts = _parse_iso(attrs.get("startTime"))
+                end_ts = _parse_iso(attrs.get("endTime"))
+                # NBU sends 1970-01-01T00:00:00 for "no end time recorded"; normalize.
+                if end_ts < 86400.0:
+                    end_ts = 0.0
+                elapsed_sec = _parse_elapsed(attrs.get("elapsedTime"))
+
+                if self._emit_failed and status_int != 0:
+                    nbu_job_failed.add_metric(
+                        [
+                            job_id,
+                            client,
+                            policy,
+                            policy_type,
+                            schedule,
+                            storage_unit,
+                            media_server,
+                            str(status_int),
+                            job_owner,
+                            job_type,
+                            sub_type,
+                        ],
+                        1.0,
+                    )
+                    nbu_job_failed_kilobytes.add_metric(
+                        [job_id, client, policy, schedule], kb
+                    )
+                    nbu_job_failed_started.add_metric(
+                        [job_id, client, policy, schedule], start_ts
+                    )
+                    nbu_job_failed_ended.add_metric(
+                        [job_id, client, policy, schedule], end_ts
+                    )
+                    nbu_job_failed_elapsed.add_metric(
+                        [job_id, client, policy, schedule], elapsed_sec
+                    )
+
+                if self._emit_active and state_str == "ACTIVE":
+                    percent = _as_float(attrs.get("percentComplete"))
+                    rate = _as_float(attrs.get("transferRate"))
+                    nbu_job_active.add_metric(
+                        [
+                            job_id,
+                            client,
+                            policy,
+                            policy_type,
+                            schedule,
+                            storage_unit,
+                            media_server,
+                            job_owner,
+                            job_type,
+                            sub_type,
+                        ],
+                        1.0,
+                    )
+                    nbu_job_active_percent.add_metric(
+                        [job_id, client, policy, schedule], percent
+                    )
+                    nbu_job_active_kbytes.add_metric(
+                        [job_id, client, policy, schedule], kb
+                    )
+                    nbu_job_active_started.add_metric(
+                        [job_id, client, policy, schedule], start_ts
+                    )
+                    nbu_job_active_rate.add_metric(
+                        [job_id, client, policy, schedule], rate
+                    )
+
+        if self._emit_failed:
+            yield nbu_job_failed
+            yield nbu_job_failed_kilobytes
+            yield nbu_job_failed_started
+            yield nbu_job_failed_ended
+            yield nbu_job_failed_elapsed
+
+        if self._emit_active:
+            yield nbu_job_active
+            yield nbu_job_active_percent
+            yield nbu_job_active_kbytes
+            yield nbu_job_active_started
+            yield nbu_job_active_rate
 
 
 # --------------------------------------------------------------------------- #

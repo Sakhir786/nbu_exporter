@@ -74,6 +74,12 @@ collectors:
     cacheTTLSeconds: 60           # share window across dependent collectors
     pageSize: null                # (optional) inherit nbu.pagination.pageSize
     maxPages: null                # (optional) inherit nbu.pagination.maxPages
+    # Per-job metric emission — emits individual series for failed and active
+    # jobs so Grafana can render sortable tables with per-job detail. Each
+    # adds ~4-5 series per matching job; on busy masters this can be 100k+
+    # Prometheus series. Disable either if Prometheus is under pressure.
+    emitFailedJobs: true          # emits nbu_job_failed* per failed job (status != 0)
+    emitActiveJobs: true          # emits nbu_job_active* per active job (state == ACTIVE)
 
   # ----- Job states roll-up -----
   jobStates:

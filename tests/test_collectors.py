@@ -106,6 +106,143 @@ def test_jobs_collector_metrics_shape() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Per-job emission (v0.4.2)
+# --------------------------------------------------------------------------- #
+
+
+def _job(
+    job_id: int,
+    *,
+    status: int = 0,
+    state: str = "DONE",
+    client: str = "host1",
+    policy: str = "policy-a",
+    policy_type: str = "VMware",
+    schedule: str = "daily",
+    storage_unit: str = "stu-a",
+    media_server: str = "ms-a",
+    kbytes: int = 0,
+    start: str = "2026-05-01T00:00:00Z",
+    end: str = "2026-05-01T01:00:00Z",
+    elapsed: str = "01:00:00",
+    percent: int = 0,
+    rate: int = 0,
+    job_type: str = "BACKUP",
+    sub_type: str = "FULL",
+    owner: str = "root",
+) -> dict[str, dict[str, Any]]:
+    return {
+        "attributes": {
+            "jobId": job_id,
+            "status": status,
+            "state": state,
+            "clientName": client,
+            "policyName": policy,
+            "policyType": policy_type,
+            "scheduleName": schedule,
+            "destinationStorageUnitName": storage_unit,
+            "destinationMediaServerName": media_server,
+            "kilobytesTransferred": kbytes,
+            "startTime": start,
+            "endTime": end,
+            "elapsedTime": elapsed,
+            "percentComplete": percent,
+            "transferRate": rate,
+            "jobType": job_type,
+            "jobSubType": sub_type,
+            "jobOwner": owner,
+        }
+    }
+
+
+def test_jobs_collector_emits_per_job_failed_series() -> None:
+    cfg = Config()
+    jobs = [
+        _job(1, status=2106),
+        _job(2, status=1),
+        _job(3, status=0),  # success — must not appear
+    ]
+    sub = JobsCollector(_fake_client(jobs=jobs), cfg)
+    metrics = list(sub.collect(MagicMock()))
+    failed = _find(metrics, "nbu_job_failed")
+    by_id = {s.labels["job_id"]: s.labels["status"] for s in failed.samples}
+    assert set(by_id) == {"1", "2"}
+    assert by_id["1"] == "2106"
+    assert by_id["2"] == "1"
+    # Companion metrics emit one series per failed job.
+    assert len(_find(metrics, "nbu_job_failed_kilobytes").samples) == 2
+
+
+def test_jobs_collector_emits_per_job_active_series() -> None:
+    cfg = Config()
+    jobs = [
+        _job(10, state="ACTIVE", percent=42, rate=1024, kbytes=999),
+        _job(11, state="QUEUED"),
+        _job(12, state="DONE", status=0),
+    ]
+    sub = JobsCollector(_fake_client(jobs=jobs), cfg)
+    metrics = list(sub.collect(MagicMock()))
+    active = _find(metrics, "nbu_job_active")
+    assert {s.labels["job_id"] for s in active.samples} == {"10"}
+    pct = _find(metrics, "nbu_job_active_percent_complete")
+    assert pct.samples[0].value == 42.0
+    rate = _find(metrics, "nbu_job_active_transfer_rate")
+    assert rate.samples[0].value == 1024.0
+    kb = _find(metrics, "nbu_job_active_kilobytes_transferred")
+    assert kb.samples[0].value == 999.0
+
+
+def test_jobs_collector_skips_failed_emission_when_disabled() -> None:
+    cfg = Config()
+    cfg.collectors.jobs.emitFailedJobs = False
+    sub = JobsCollector(_fake_client(jobs=[_job(1, status=2106)]), cfg)
+    names = {m.name for m in sub.collect(MagicMock())}
+    assert not any(n.startswith("nbu_job_failed") for n in names), names
+
+
+def test_jobs_collector_skips_active_emission_when_disabled() -> None:
+    cfg = Config()
+    cfg.collectors.jobs.emitActiveJobs = False
+    sub = JobsCollector(_fake_client(jobs=[_job(1, state="ACTIVE")]), cfg)
+    names = {m.name for m in sub.collect(MagicMock())}
+    assert not any(n.startswith("nbu_job_active") for n in names), names
+
+
+def test_jobs_collector_parses_elapsed_time_format() -> None:
+    cfg = Config()
+    sub = JobsCollector(
+        _fake_client(jobs=[_job(1, status=2106, elapsed="01:23:45")]), cfg
+    )
+    metrics = list(sub.collect(MagicMock()))
+    elapsed = _find(metrics, "nbu_job_failed_elapsed_seconds")
+    # 1*3600 + 23*60 + 45 = 5025
+    assert elapsed.samples[0].value == 5025.0
+
+
+def test_jobs_collector_normalizes_epoch_end_time() -> None:
+    cfg = Config()
+    sub = JobsCollector(
+        _fake_client(jobs=[_job(1, status=2106, end="1970-01-01T00:00:00.000Z")]),
+        cfg,
+    )
+    metrics = list(sub.collect(MagicMock()))
+    ended = _find(metrics, "nbu_job_failed_ended_timestamp")
+    assert ended.samples[0].value == 0.0
+
+
+def test_jobs_collector_strips_whitespace_storage_unit() -> None:
+    cfg = Config()
+    sub = JobsCollector(
+        _fake_client(jobs=[_job(1, status=2106, storage_unit=" ", media_server=" ")]),
+        cfg,
+    )
+    metrics = list(sub.collect(MagicMock()))
+    failed = _find(metrics, "nbu_job_failed")
+    assert failed.samples[0].labels["storage_unit"] == ""
+    assert failed.samples[0].labels["media_server"] == ""
+
+
+# --------------------------------------------------------------------------- #
 # Storage units — now takes jobs cache for label back-fill
 # --------------------------------------------------------------------------- #
 
