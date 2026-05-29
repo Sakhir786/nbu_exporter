@@ -288,53 +288,44 @@ class JobsCollector:
 
 
 class ClientsCollector:
+    """Derive the client inventory from cached job records.
+
+    NBU 10.0 returns HTTP 404 from /config/hosts, /config/clients and
+    /admin/clients. The only reliable source for "what clients does this
+    master see" is the clientName field on each job. We dedup and emit.
+    The old hostsEndpoint / hostTypeField / clientHostTypeValues knobs in
+    ``ClientsCollectorConfig`` are retained so v0.3 configs keep loading
+    cleanly; they are unused here.
+    """
+
     name = "clients"
 
-    def __init__(self, client: NBUClient, cfg: Config) -> None:
+    def __init__(
+        self,
+        client: NBUClient,
+        cfg: Config,
+        jobs_cache: TTLCache[list[dict[str, Any]]],
+    ) -> None:
         self._client = client
         self._cfg = cfg.collectors.clients
-        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
-            cfg.collectors.clients.pageSize, cfg.collectors.clients.maxPages
-        )
-        # Pre-lower for case-insensitive comparisons inside collect().
-        self._wanted_types = {v.lower() for v in self._cfg.clientHostTypeValues}
-        self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.collectors.clients.cacheTTLSeconds,
-            fetcher=self._fetch,
-        )
-
-    def _fetch(self) -> list[dict[str, Any]]:
-        # No server-side filter — /config/hosts on NBU 10.0 rejects OData
-        # `filter=` with HTTP 400 + errorCode 133. We fetch every host and
-        # filter in collect() using the configured field/value list.
-        return self._client.get_all(
-            self._cfg.hostsEndpoint,
-            params=None,
-            page_size=self._page_size,
-            max_pages=self._max_pages,
-            style=self._style,
-            data_key=self._cfg.hostsResponseKey,
-        )
+        self._jobs_cache = jobs_cache
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
-        hosts = self.cache.get()
+        jobs = self._jobs_cache.get()
         info = GaugeMetricFamily(
             "nbu_client_info",
-            "NetBackup client inventory; constant 1, labels carry metadata.",
+            "NetBackup client inventory derived from job records; constant 1.",
             labels=["client", "hardware", "os"],
         )
-        field_name = self._cfg.hostTypeField
-        for entry in hosts:
-            attrs = _job_attrs(entry)
-            host_type = _as_str(attrs.get(field_name)).lower()
-            if host_type not in self._wanted_types:
+        seen: set[str] = set()
+        for job in jobs:
+            attrs = _job_attrs(job)
+            name = _as_str(attrs.get("clientName")).strip()
+            if not name or name in seen:
                 continue
-            name = _as_str(attrs.get("name") or attrs.get("hostName"))
-            if not name:
-                continue
-            hardware = _as_str(attrs.get("hardware") or attrs.get("hardwareType"))
-            os_name = _as_str(attrs.get("os") or attrs.get("osType"))
-            info.add_metric([name, hardware, os_name], 1.0)
+            seen.add(name)
+            # hardware/os are not present on /admin/jobs records.
+            info.add_metric([name, "", ""], 1.0)
         yield info
 
 
@@ -344,43 +335,44 @@ class ClientsCollector:
 
 
 class PoliciesCollector:
+    """Derive the policy inventory from cached job records.
+
+    Same rationale as ClientsCollector: /config/policies is unreliable on
+    NBU 10.0. The jobs cache gives us a complete view of every policy that
+    has run inside the lookback window.
+    """
+
     name = "policies"
 
-    def __init__(self, client: NBUClient, cfg: Config) -> None:
+    def __init__(
+        self,
+        client: NBUClient,
+        cfg: Config,
+        jobs_cache: TTLCache[list[dict[str, Any]]],
+    ) -> None:
         self._client = client
         self._cfg = cfg.collectors.policies
-        self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
-            cfg.collectors.policies.pageSize, cfg.collectors.policies.maxPages
-        )
-        self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
-            ttl_seconds=cfg.collectors.policies.cacheTTLSeconds,
-            fetcher=self._fetch,
-        )
-
-    def _fetch(self) -> list[dict[str, Any]]:
-        return self._client.get_all(
-            "/config/policies",
-            params=None,
-            page_size=self._page_size,
-            max_pages=self._max_pages,
-            style=self._style,
-        )
+        self._jobs_cache = jobs_cache
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
-        policies = self.cache.get()
+        jobs = self._jobs_cache.get()
         info = GaugeMetricFamily(
             "nbu_policy_info",
-            "NetBackup policy inventory; constant 1, labels carry metadata.",
+            "NetBackup policy inventory derived from job records; constant 1.",
             labels=["policy_name", "policy_type", "active"],
         )
-        for entry in policies:
-            attrs = _job_attrs(entry)
-            name = _as_str(attrs.get("policyName") or attrs.get("name"))
+        seen: set[tuple[str, str]] = set()
+        for job in jobs:
+            attrs = _job_attrs(job)
+            name = _as_str(attrs.get("policyName")).strip()
             if not name:
                 continue
-            ptype = _as_str(attrs.get("policyType") or attrs.get("type"))
-            active = _as_str(attrs.get("active", attrs.get("isActive", False)))
-            info.add_metric([name, ptype, active], 1.0)
+            ptype = _as_str(attrs.get("policyType")).strip()
+            key = (name, ptype)
+            if key in seen:
+                continue
+            seen.add(key)
+            info.add_metric([name, ptype, ""], 1.0)
         yield info
 
 
@@ -390,15 +382,28 @@ class PoliciesCollector:
 
 
 class StorageUnitsCollector:
+    """Emit storage-unit capacity and supplement labels from cached jobs.
+
+    NBU 10.0 returns ``null`` for ``mediaServer`` and ``storageUnitType``
+    on /storage/storage-units. We back-fill those labels by inspecting
+    job records that targeted each storage unit.
+    """
+
     name = "storage_units"
 
-    def __init__(self, client: NBUClient, cfg: Config) -> None:
+    def __init__(
+        self,
+        client: NBUClient,
+        cfg: Config,
+        jobs_cache: TTLCache[list[dict[str, Any]]],
+    ) -> None:
         self._client = client
         self._cfg = cfg.collectors.storageUnits
         self._cloud_re = re.compile(cfg.collectors.storageUnits.cloudTypePattern)
         self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
             cfg.collectors.storageUnits.pageSize, cfg.collectors.storageUnits.maxPages
         )
+        self._jobs_cache = jobs_cache
         self.cache: TTLCache[list[dict[str, Any]]] = TTLCache(
             ttl_seconds=cfg.collectors.storageUnits.cacheTTLSeconds,
             fetcher=self._fetch,
@@ -413,8 +418,22 @@ class StorageUnitsCollector:
             style=self._style,
         )
 
+    def _supplement_from_jobs(self) -> dict[str, tuple[str, str]]:
+        """Build {storage_unit -> (media_server, type)} from cached job records."""
+        out: dict[str, tuple[str, str]] = {}
+        for job in self._jobs_cache.get():
+            attrs = _job_attrs(job)
+            su = _as_str(attrs.get("destinationStorageUnitName")).strip()
+            if not su:
+                continue
+            ms = _as_str(attrs.get("destinationMediaServerName")).strip()
+            # First sighting wins — the field is consistent per storage unit.
+            out.setdefault(su, (ms, ""))
+        return out
+
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
         units = self.cache.get()
+        job_meta = self._supplement_from_jobs()
         disk_bytes = GaugeMetricFamily(
             "nbu_disk_bytes",
             "Storage unit capacity in bytes; size label is free or used.",
@@ -426,6 +445,10 @@ class StorageUnitsCollector:
             if not name:
                 continue
             stype = _as_str(attrs.get("storageUnitType") or attrs.get("type"))
+            if not stype:
+                # Back-fill from jobs (type field not present there yet,
+                # but the lookup keeps the contract symmetric).
+                stype = job_meta.get(name, ("", ""))[1]
             used = _as_float(attrs.get("usedBytes"))
             free = _as_float(attrs.get("freeBytes"))
             is_cloud = bool(self._cloud_re.match(stype.lower())) if stype else False
@@ -441,12 +464,23 @@ class StorageUnitsCollector:
 
 
 class DiskPoolsCollector:
+    """Read /storage/disk-pools with fields=*&include=* and merge per-pool detail.
+
+    Calling /storage/disk-pools without the ``fields=*&include=*`` query
+    params yields nulls for capacity on NBU 10.0. We always pass them, then
+    for each non-cloud pool fetch /storage/disk-pools/{sType:Name} to pick
+    up the pool-level aggregates (rawSizeBytes, usableSizeBytes,
+    availableSpaceBytes, usedCapacityBytes) that the list endpoint omits.
+    State is reported as the string ``"UP"`` / ``"DOWN"`` — parse it as
+    such; the old numeric upStateValues from v0.3 is ignored but kept on
+    the config dataclass so existing config files still load.
+    """
+
     name = "disk_pools"
 
     def __init__(self, client: NBUClient, cfg: Config) -> None:
         self._client = client
         self._cfg = cfg.collectors.diskPools
-        self._up_states = set(cfg.collectors.diskPools.upStateValues)
         self._page_size, self._max_pages, self._style = cfg.resolve_pagination(
             cfg.collectors.diskPools.pageSize, cfg.collectors.diskPools.maxPages
         )
@@ -456,19 +490,62 @@ class DiskPoolsCollector:
         )
 
     def _fetch(self) -> list[dict[str, Any]]:
-        return self._client.get_all(
+        pools = self._client.get_all(
             "/storage/disk-pools",
-            params=None,
+            params={"fields": "*", "include": "*"},
             page_size=self._page_size,
             max_pages=self._max_pages,
             style=self._style,
         )
+        for pool in pools:
+            attrs = _job_attrs(pool)
+            category = _as_str(attrs.get("storageCategory"))
+            if category == "CLOUD":
+                # Cloud pools report nothing useful at the detail endpoint.
+                continue
+            pool_id = _as_str(pool.get("id"))
+            if not pool_id:
+                continue
+            try:
+                detail = self._client.get(
+                    f"/storage/disk-pools/{pool_id}", params={"fields": "*"}
+                )
+            except Exception as exc:  # noqa: BLE001 — per-pool failure must not abort scrape
+                LOGGER.warning("disk pool detail fetch failed for %s: %s", pool_id, exc)
+                continue
+            data = detail.get("data") if isinstance(detail, dict) else None
+            detail_attrs = data.get("attributes", {}) if isinstance(data, dict) else {}
+            if not isinstance(detail_attrs, dict):
+                continue
+            for k in ("rawSizeBytes", "usableSizeBytes", "availableSpaceBytes", "usedCapacityBytes"):
+                if k in detail_attrs:
+                    attrs[k] = detail_attrs[k]
+        return pools
+
+    @staticmethod
+    def _storage_server_label(entry: dict[str, Any]) -> str:
+        """Return the storage server name from JSON:API relationships."""
+        rels = entry.get("relationships")
+        if not isinstance(rels, dict):
+            return ""
+        ss = rels.get("storageServers")
+        if not isinstance(ss, dict):
+            return ""
+        data = ss.get("data")
+        if not isinstance(data, list) or not data:
+            return ""
+        first = data[0]
+        if not isinstance(first, dict):
+            return ""
+        sid = _as_str(first.get("id"))
+        # id format is "sType:name" on NBU 10.0; split once if present.
+        return sid.split(":", 1)[1] if ":" in sid else sid
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
         pools = self.cache.get()
         cap = GaugeMetricFamily(
             "nbu_disk_pool_capacity_bytes",
-            "Disk pool total capacity in bytes.",
+            "Disk pool total raw capacity in bytes.",
             labels=["pool", "storage_server", "server_type"],
         )
         used = GaugeMetricFamily(
@@ -483,12 +560,12 @@ class DiskPoolsCollector:
         )
         state = GaugeMetricFamily(
             "nbu_disk_pool_state",
-            "Raw numeric state code reported by the NBU API.",
+            "1 if the pool's diskPoolState is UP, else 0.",
             labels=["pool", "storage_server", "server_type"],
         )
         up = GaugeMetricFamily(
             "nbu_disk_pool_up",
-            "1 if disk pool state is in collectors.diskPools.upStateValues, else 0.",
+            "1 if the pool's diskPoolState is UP, else 0.",
             labels=["pool"],
         )
         volumes = GaugeMetricFamily(
@@ -496,40 +573,71 @@ class DiskPoolsCollector:
             "Number of volumes in the disk pool.",
             labels=["pool"],
         )
+        high_wm = GaugeMetricFamily(
+            "nbu_disk_pool_high_watermark_percent",
+            "Configured high watermark percent for the pool.",
+            labels=["pool"],
+        )
+        low_wm = GaugeMetricFamily(
+            "nbu_disk_pool_low_watermark_percent",
+            "Configured low watermark percent for the pool.",
+            labels=["pool"],
+        )
+        capabilities = GaugeMetricFamily(
+            "nbu_disk_pool_capability",
+            "Disk pool capability strings reported by NBU; constant 1 per capability.",
+            labels=["pool", "capability"],
+        )
+
         for entry in pools:
             attrs = _job_attrs(entry)
             name = _as_str(attrs.get("name") or attrs.get("diskPoolName"))
             if not name:
                 continue
-            servers = attrs.get("storageServers") or []
-            if isinstance(servers, list) and servers:
-                first = servers[0]
-                if isinstance(first, dict):
-                    server_name = _as_str(first.get("name") or first.get("hostName"))
-                    server_type = _as_str(first.get("serverType") or first.get("type"))
-                else:
-                    server_name = _as_str(first)
-                    server_type = ""
-            else:
-                server_name = _as_str(attrs.get("storageServerName"))
-                server_type = _as_str(attrs.get("storageServerType"))
-            capacity_bytes = _as_float(attrs.get("totalCapacityBytes") or attrs.get("capacity"))
+            stype = _as_str(attrs.get("sType") or attrs.get("storageServerType"))
+            server_name = self._storage_server_label(entry)
+            capacity_bytes = _as_float(
+                attrs.get("rawSizeBytes")
+                or attrs.get("totalCapacityBytes")
+                or attrs.get("capacity")
+            )
             used_bytes = _as_float(attrs.get("usedCapacityBytes") or attrs.get("used"))
-            state_val = _as_int(attrs.get("state"))
-            vol_count = _as_int(attrs.get("numVolumes") or attrs.get("volumeCount"))
-            cap.add_metric([name, server_name, server_type], capacity_bytes)
-            used.add_metric([name, server_name, server_type], used_bytes)
+            state_str = _as_str(attrs.get("diskPoolState") or attrs.get("state"))
+            is_up = 1.0 if state_str.upper() == "UP" else 0.0
+            vol_list = attrs.get("diskVolumes") or attrs.get("volumes") or []
+            vol_count = (
+                len(vol_list)
+                if isinstance(vol_list, list)
+                else _as_int(attrs.get("numVolumes") or attrs.get("volumeCount"))
+            )
+
+            cap.add_metric([name, server_name, stype], capacity_bytes)
+            used.add_metric([name, server_name, stype], used_bytes)
             if capacity_bytes > 0:
-                ratio.add_metric([name, server_name, server_type], used_bytes / capacity_bytes)
-            state.add_metric([name, server_name, server_type], float(state_val))
-            up.add_metric([name], 1.0 if state_val in self._up_states else 0.0)
+                ratio.add_metric([name, server_name, stype], used_bytes / capacity_bytes)
+            state.add_metric([name, server_name, stype], is_up)
+            up.add_metric([name], is_up)
             volumes.add_metric([name], float(vol_count))
+
+            for k, metric in (("highWaterMark", high_wm), ("lowWaterMark", low_wm)):
+                v = attrs.get(k)
+                if v is not None:
+                    metric.add_metric([name], _as_float(v))
+
+            caps = attrs.get("diskPoolCapabilities")
+            if isinstance(caps, list):
+                for c in caps:
+                    capabilities.add_metric([name, _as_str(c)], 1.0)
+
         yield cap
         yield used
         yield ratio
         yield state
         yield up
         yield volumes
+        yield high_wm
+        yield low_wm
+        yield capabilities
 
 
 # --------------------------------------------------------------------------- #
@@ -538,6 +646,15 @@ class DiskPoolsCollector:
 
 
 class StorageServersCollector:
+    """Read /storage/storage-servers with fields=*&include=*.
+
+    NBU 10.0's ``storageServerState`` is a string ("UP" / "DOWN"). The
+    previous v0.3 code parsed it as int and always emitted 0; with the
+    string parser here, plus the ``fields=*&include=*`` query parameters,
+    the existing ``nbu_storage_server_state`` and ``nbu_storage_server_info``
+    metrics start returning real values.
+    """
+
     name = "storage_servers"
 
     def __init__(self, client: NBUClient, cfg: Config) -> None:
@@ -554,7 +671,7 @@ class StorageServersCollector:
     def _fetch(self) -> list[dict[str, Any]]:
         return self._client.get_all(
             "/storage/storage-servers",
-            params=None,
+            params={"fields": "*", "include": "*"},
             page_size=self._page_size,
             max_pages=self._max_pages,
             style=self._style,
@@ -569,21 +686,56 @@ class StorageServersCollector:
         )
         state = GaugeMetricFamily(
             "nbu_storage_server_state",
-            "Raw numeric state code reported by the NBU API.",
+            "1 if storageServerState is UP, else 0.",
             labels=["name", "type"],
         )
+        status_code = GaugeMetricFamily(
+            "nbu_storage_server_nbu_status_code",
+            "Raw nbuStatusCode reported by the storage server (omitted when null).",
+            labels=["name", "type"],
+        )
+        version = GaugeMetricFamily(
+            "nbu_storage_server_version",
+            "Storage server nbuHostVersion; constant 1, version label carries the value.",
+            labels=["name", "version"],
+        )
+        capability = GaugeMetricFamily(
+            "nbu_storage_server_capability",
+            "Storage server capability strings; constant 1 per capability.",
+            labels=["name", "capability"],
+        )
+
         for entry in servers:
             attrs = _job_attrs(entry)
             name = _as_str(attrs.get("name") or attrs.get("hostName"))
             if not name:
                 continue
-            stype = _as_str(attrs.get("serverType") or attrs.get("type"))
-            category = _as_str(attrs.get("category") or attrs.get("storageCategory"))
-            state_val = _as_int(attrs.get("state"))
+            stype = _as_str(attrs.get("sType") or attrs.get("serverType") or attrs.get("type"))
+            category = _as_str(attrs.get("storageCategory") or attrs.get("category"))
+            state_str = _as_str(attrs.get("storageServerState") or attrs.get("state"))
+            is_up = 1.0 if state_str.upper() == "UP" else 0.0
+
             info.add_metric([name, stype, category], 1.0)
-            state.add_metric([name, stype], float(state_val))
+            state.add_metric([name, stype], is_up)
+
+            raw_status = attrs.get("nbuStatusCode")
+            if raw_status is not None:
+                status_code.add_metric([name, stype], _as_float(raw_status))
+
+            ver = _as_str(attrs.get("nbuHostVersion"))
+            if ver:
+                version.add_metric([name, ver], 1.0)
+
+            caps = attrs.get("storageServerCapabilities")
+            if isinstance(caps, list):
+                for c in caps:
+                    capability.add_metric([name, _as_str(c)], 1.0)
+
         yield info
         yield state
+        yield status_code
+        yield version
+        yield capability
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +744,15 @@ class StorageServersCollector:
 
 
 class MSDPCollector:
+    """MSDP dedup ratio / logical / physical bytes (best-effort).
+
+    NBU 10.0 REST does not expose ``logicalBytes`` / ``physicalBytes`` /
+    ``dedupRatio`` on any tested endpoint. The metrics keep emitting (so
+    existing dashboards do not break) but values are 0 until the master
+    surfaces them. True dedup ratio requires ``crcontrol --dsstat`` on the
+    MSDP node, which the exporter cannot reach over REST.
+    """
+
     name = "msdp"
 
     def __init__(
@@ -657,6 +818,103 @@ class MSDPCollector:
         yield dedup
         yield logical
         yield physical
+
+
+# --------------------------------------------------------------------------- #
+# Disk volumes collector — derived from the shared disk-pools cache
+# --------------------------------------------------------------------------- #
+
+
+class DiskVolumesCollector:
+    """Per-volume runtime metrics extracted from the diskVolumes[] arrays.
+
+    Same data shared by ``DiskPoolsCollector`` — this collector makes no
+    additional API call. It surfaces the per-volume UP/DOWN state, which is
+    the only place we can see when a single volume on an otherwise-healthy
+    pool is unreachable from the master.
+    """
+
+    name = "disk_volumes"
+
+    def __init__(
+        self,
+        cfg: Config,
+        disk_pools_cache: TTLCache[list[dict[str, Any]]],
+    ) -> None:
+        self._cfg = cfg.collectors.diskVolumes
+        self._disk_pools_cache = disk_pools_cache
+
+    def collect(self, _state: ScrapeState) -> Iterable[Metric]:
+        pools = self._disk_pools_cache.get()
+        up = GaugeMetricFamily(
+            "nbu_disk_volume_up",
+            "1 if the volume's state is UP, else 0.",
+            labels=["pool", "volume", "media_id"],
+        )
+        cap = GaugeMetricFamily(
+            "nbu_disk_volume_capacity_bytes",
+            "Volume total capacity in bytes.",
+            labels=["pool", "volume", "media_id"],
+        )
+        free = GaugeMetricFamily(
+            "nbu_disk_volume_free_bytes",
+            "Volume free space in bytes.",
+            labels=["pool", "volume", "media_id"],
+        )
+        used_pct = GaugeMetricFamily(
+            "nbu_disk_volume_used_percent",
+            "Volume used percent, derived from raw and free bytes.",
+            labels=["pool", "volume", "media_id"],
+        )
+        repl_src = GaugeMetricFamily(
+            "nbu_disk_volume_replication_source",
+            "1 if the volume is a replication source.",
+            labels=["pool", "volume"],
+        )
+        repl_tgt = GaugeMetricFamily(
+            "nbu_disk_volume_replication_target",
+            "1 if the volume is a replication target.",
+            labels=["pool", "volume"],
+        )
+
+        for entry in pools:
+            attrs = _job_attrs(entry)
+            pool_name = _as_str(attrs.get("name") or attrs.get("diskPoolName"))
+            if not pool_name:
+                continue
+            for vol in attrs.get("diskVolumes") or []:
+                if not isinstance(vol, dict):
+                    continue
+                vol_name = _as_str(vol.get("name"))
+                if not vol_name:
+                    continue
+                media_id = _as_str(vol.get("diskMediaId"))
+                state_str = _as_str(vol.get("state"))
+                is_up = 1.0 if state_str.upper() == "UP" else 0.0
+                raw_b = _as_float(vol.get("rawSizeBytes"))
+                free_b = _as_float(vol.get("freeSizeBytes"))
+
+                up.add_metric([pool_name, vol_name, media_id], is_up)
+                if raw_b > 0:
+                    cap.add_metric([pool_name, vol_name, media_id], raw_b)
+                    free.add_metric([pool_name, vol_name, media_id], free_b)
+                    used_pct.add_metric(
+                        [pool_name, vol_name, media_id],
+                        100.0 * (1.0 - free_b / raw_b),
+                    )
+                repl_src.add_metric(
+                    [pool_name, vol_name], 1.0 if vol.get("isReplicationSource") else 0.0
+                )
+                repl_tgt.add_metric(
+                    [pool_name, vol_name], 1.0 if vol.get("isReplicationTarget") else 0.0
+                )
+
+        yield up
+        yield cap
+        yield free
+        yield used_pct
+        yield repl_src
+        yield repl_tgt
 
 
 # --------------------------------------------------------------------------- #
@@ -727,22 +985,54 @@ class NBUCollector:
         self._error_totals: dict[str, int] = {}
 
         collectors = cfg.collectors
+        # Jobs first: clients, policies, storage units, and catalog all read
+        # from its TTL cache.
         self._jobs_sub = JobsCollector(client, cfg) if collectors.jobs.enabled else None
-        self._clients_sub = ClientsCollector(client, cfg) if collectors.clients.enabled else None
-        self._policies_sub = PoliciesCollector(client, cfg) if collectors.policies.enabled else None
-        self._storage_units_sub = (
-            StorageUnitsCollector(client, cfg) if collectors.storageUnits.enabled else None
-        )
+        jobs_cache = self._jobs_sub.cache if self._jobs_sub is not None else None
+
+        self._clients_sub: ClientsCollector | None = None
+        if collectors.clients.enabled:
+            if jobs_cache is None:
+                LOGGER.warning(
+                    "clients collector requires jobs collector to be enabled "
+                    "(NBU 10.0 has no /config/hosts endpoint); skipping clients"
+                )
+            else:
+                self._clients_sub = ClientsCollector(client, cfg, jobs_cache)
+
+        self._policies_sub: PoliciesCollector | None = None
+        if collectors.policies.enabled:
+            if jobs_cache is None:
+                LOGGER.warning(
+                    "policies collector requires jobs collector to be enabled; "
+                    "skipping policies"
+                )
+            else:
+                self._policies_sub = PoliciesCollector(client, cfg, jobs_cache)
+
+        self._storage_units_sub: StorageUnitsCollector | None = None
+        if collectors.storageUnits.enabled:
+            if jobs_cache is None:
+                LOGGER.warning(
+                    "storage_units collector relies on the jobs cache for label "
+                    "back-fill; skipping storage_units"
+                )
+            else:
+                self._storage_units_sub = StorageUnitsCollector(client, cfg, jobs_cache)
+
         self._disk_pools_sub = (
             DiskPoolsCollector(client, cfg) if collectors.diskPools.enabled else None
         )
         self._storage_servers_sub = (
             StorageServersCollector(client, cfg) if collectors.storageServers.enabled else None
         )
-        self._msdp_sub = None
+        self._msdp_sub: MSDPCollector | None = None
         if collectors.msdp.enabled and self._disk_pools_sub is not None:
             self._msdp_sub = MSDPCollector(client, cfg, self._disk_pools_sub.cache)
-        self._catalog_sub = None
+        self._disk_volumes_sub: DiskVolumesCollector | None = None
+        if collectors.diskVolumes.enabled and self._disk_pools_sub is not None:
+            self._disk_volumes_sub = DiskVolumesCollector(cfg, self._disk_pools_sub.cache)
+        self._catalog_sub: CatalogCollector | None = None
         if collectors.catalog.enabled and self._jobs_sub is not None:
             self._catalog_sub = CatalogCollector(cfg, self._jobs_sub.cache)
 
@@ -753,6 +1043,7 @@ class NBUCollector:
             "policies": self._cfg.policies.enabled,
             "storage_units": self._cfg.storageUnits.enabled,
             "disk_pools": self._cfg.diskPools.enabled,
+            "disk_volumes": self._cfg.diskVolumes.enabled,
             "storage_servers": self._cfg.storageServers.enabled,
             "msdp": self._cfg.msdp.enabled,
             "catalog": self._cfg.catalog.enabled,
@@ -791,6 +1082,7 @@ class NBUCollector:
             self._policies_sub,
             self._storage_units_sub,
             self._disk_pools_sub,
+            self._disk_volumes_sub,
             self._storage_servers_sub,
             self._msdp_sub,
             self._catalog_sub,

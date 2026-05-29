@@ -30,8 +30,8 @@ nbu:
   host: nbu-master.example.com    # REQUIRED — your NBU master FQDN/IP
   port: 1556
   basePath: /netbackup
-  apiVersion: "3.0"               # see Compatibility table in README
-  contentType: "application/vnd.netbackup+json;version=3.0"
+  apiVersion: "7.0"               # NBU 10.0 = API 7.0; see Compatibility table in README
+  contentType: "application/vnd.netbackup+json;version=7.0"
   apiKey: "REPLACE_WITH_NBU_API_KEY"   # REQUIRED
   insecureSkipVerify: false       # true ONLY for lab use with self-signed certs
   caCertFile: ""                  # optional path to a CA bundle
@@ -136,6 +136,13 @@ collectors:
     pageSize: null                # (optional)
     maxPages: null                # (optional)
 
+  # ----- Disk volumes (derived from disk-pools cache) -----
+  # Emits per-volume runtime state and capacity from the diskVolumes[]
+  # array inside the disk-pools response. No separate API call.
+  diskVolumes:
+    enabled: true
+    cacheTTLSeconds: 300          # not used directly; piggybacks on diskPools cache
+
   # ----- MSDP (derived from disk-pools cache) -----
   msdp:
     enabled: true
@@ -151,4 +158,4 @@ collectors:
     # Policy-type values reported by /admin/jobs that represent catalog jobs.
     # Varies by NBU version — add entries if your master uses a different name.
     policyTypeValues:
-      - "NBU-Catalog"
+      - "NBU_CATALOG"            # NBU 10.0 reports this with underscore

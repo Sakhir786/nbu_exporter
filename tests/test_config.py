@@ -68,6 +68,7 @@ collectors:
   storageServers: {enabled: false}
   msdp: {enabled: false}
   catalog: {enabled: false}
+  diskVolumes: {enabled: false}
 """
     )
     with pytest.raises(ValueError, match="collector"):
@@ -77,7 +78,7 @@ collectors:
 def test_defaults_applied_for_missing_collector_block(tmp_path: Path) -> None:
     cfg = load_config(_write(tmp_path, VALID))
     assert cfg.collectors.diskPools.upStateValues == [2, 1]
-    assert cfg.collectors.catalog.policyTypeValues == ["NBU-Catalog"]
+    assert cfg.collectors.catalog.policyTypeValues == ["NBU_CATALOG"]
     assert cfg.collectors.jobs.lookbackHours == 24
 
 

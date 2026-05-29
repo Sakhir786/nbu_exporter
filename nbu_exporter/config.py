@@ -49,8 +49,8 @@ class NBUConfig:
     host: str = ""
     port: int = 1556
     basePath: str = "/netbackup"
-    apiVersion: str = "3.0"
-    contentType: str = "application/vnd.netbackup+json;version=3.0"
+    apiVersion: str = "7.0"
+    contentType: str = "application/vnd.netbackup+json;version=7.0"
     apiKey: str = ""
     insecureSkipVerify: bool = False
     caCertFile: str = ""
@@ -139,10 +139,18 @@ class MSDPCollectorConfig:
 
 
 @dataclass
+class DiskVolumesCollectorConfig:
+    """Per-volume metrics derived from the disk-pools cache (no extra API call)."""
+
+    enabled: bool = True
+    cacheTTLSeconds: int = 300  # not used directly; piggybacks on diskPools cache
+
+
+@dataclass
 class CatalogCollectorConfig:
     enabled: bool = True
     cacheTTLSeconds: int = 600
-    policyTypeValues: list[str] = field(default_factory=lambda: ["NBU-Catalog"])
+    policyTypeValues: list[str] = field(default_factory=lambda: ["NBU_CATALOG"])
 
 
 @dataclass
@@ -161,6 +169,7 @@ class CollectorsConfig:
     )
     msdp: MSDPCollectorConfig = field(default_factory=MSDPCollectorConfig)
     catalog: CatalogCollectorConfig = field(default_factory=CatalogCollectorConfig)
+    diskVolumes: DiskVolumesCollectorConfig = field(default_factory=DiskVolumesCollectorConfig)
 
     def any_enabled(self) -> bool:
         """Return True if at least one non-health collector is enabled."""
@@ -175,6 +184,7 @@ class CollectorsConfig:
                 self.storageServers.enabled,
                 self.msdp.enabled,
                 self.catalog.enabled,
+                self.diskVolumes.enabled,
             ]
         )
 
@@ -238,6 +248,7 @@ class Config:
             ("storageServers", self.collectors.storageServers.cacheTTLSeconds),
             ("msdp", self.collectors.msdp.cacheTTLSeconds),
             ("catalog", self.collectors.catalog.cacheTTLSeconds),
+            ("diskVolumes", self.collectors.diskVolumes.cacheTTLSeconds),
         ):
             if ttl <= 0:
                 raise ValueError(f"collectors.{name}.cacheTTLSeconds must be > 0")
