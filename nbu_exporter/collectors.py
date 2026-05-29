@@ -490,13 +490,20 @@ class DiskPoolsCollector:
         )
 
     def _fetch(self) -> list[dict[str, Any]]:
-        pools = self._client.get_all(
+        # /storage/disk-pools is not paginated in any deployment we've seen;
+        # NBU 10.0 rejects page[limit] >= 100 with HTTP 400 errorCode 8961
+        # on sibling /storage endpoints. Fetch the full list in one call.
+        payload = self._client.get(
             "/storage/disk-pools",
             params={"fields": "*", "include": "*"},
-            page_size=self._page_size,
-            max_pages=self._max_pages,
-            style=self._style,
         )
+        pools = payload.get("data")
+        if not isinstance(pools, list):
+            LOGGER.warning(
+                "disk-pools response has no 'data' list (keys=%s)",
+                list(payload.keys()),
+            )
+            return []
         for pool in pools:
             attrs = _job_attrs(pool)
             category = _as_str(attrs.get("storageCategory"))
@@ -669,13 +676,21 @@ class StorageServersCollector:
         )
 
     def _fetch(self) -> list[dict[str, Any]]:
-        return self._client.get_all(
+        # /storage/storage-servers is not paginated on NBU 10.0 and rejects
+        # page[limit] >= 100 with HTTP 400 errorCode 8961 "Page limit must
+        # be less than 100." Fetch the full list in a single call.
+        payload = self._client.get(
             "/storage/storage-servers",
             params={"fields": "*", "include": "*"},
-            page_size=self._page_size,
-            max_pages=self._max_pages,
-            style=self._style,
         )
+        data = payload.get("data")
+        if not isinstance(data, list):
+            LOGGER.warning(
+                "storage-servers response has no 'data' list (keys=%s)",
+                list(payload.keys()),
+            )
+            return []
+        return data
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
         servers = self.cache.get()
@@ -936,19 +951,55 @@ class CatalogCollector:
 
     def collect(self, _state: ScrapeState) -> Iterable[Metric]:
         jobs = self._jobs_cache.get()
-        last_ts = 0.0
-        last_status = 0
-        last_size = 0
+
+        # Collect all jobs whose policyType matches the configured catalog
+        # values. NBU catalog backups are parent jobs that spawn children;
+        # the parent reports kilobytesTransferred=0 and the children carry
+        # the real bytes, so we have to sum across the family.
+        catalog_jobs: list[dict[str, Any]] = []
         for job in jobs:
             attrs = _job_attrs(job)
             ptype = _as_str(attrs.get("policyType")).lower()
-            if ptype not in self._types:
+            if ptype in self._types:
+                catalog_jobs.append(attrs)
+
+        # Pick the latest parent (parentJobId == 0) by end/start time.
+        latest_parent: dict[str, Any] | None = None
+        latest_ts = 0.0
+        latest_status = 0
+        for attrs in catalog_jobs:
+            if _as_int(attrs.get("parentJobId")) != 0:
                 continue
             ts = _parse_iso(attrs.get("endTime")) or _parse_iso(attrs.get("startTime"))
-            if ts > last_ts:
-                last_ts = ts
-                last_status = _as_int(attrs.get("status"))
-                last_size = _as_int(attrs.get("kilobytesTransferred")) * 1024
+            if ts > latest_ts:
+                latest_ts = ts
+                latest_status = _as_int(attrs.get("status"))
+                latest_parent = attrs
+
+        # No parent in the window — fall back to the most recent catalog job
+        # of any kind so we still emit a truthful timestamp/status.
+        if latest_parent is None:
+            for attrs in catalog_jobs:
+                ts = _parse_iso(attrs.get("endTime")) or _parse_iso(attrs.get("startTime"))
+                if ts > latest_ts:
+                    latest_ts = ts
+                    latest_status = _as_int(attrs.get("status"))
+                    latest_parent = attrs
+
+        last_size_kb = 0
+        if latest_parent is not None:
+            parent_id = _as_int(latest_parent.get("jobId"))
+            parent_of_match = _as_int(latest_parent.get("parentJobId"))
+            # If the lookback window only caught a child, group on its
+            # parentJobId so we sum across the same family.
+            group_id = parent_of_match if parent_of_match != 0 else parent_id
+
+            last_size_kb = _as_int(latest_parent.get("kilobytesTransferred"))
+            for attrs in catalog_jobs:
+                attrs_parent = _as_int(attrs.get("parentJobId"))
+                attrs_job = _as_int(attrs.get("jobId"))
+                if attrs_parent == group_id and attrs_job != parent_id:
+                    last_size_kb += _as_int(attrs.get("kilobytesTransferred"))
 
         ts_m = GaugeMetricFamily(
             "nbu_catalog_backup_last_timestamp",
@@ -960,11 +1011,12 @@ class CatalogCollector:
         )
         sz_m = GaugeMetricFamily(
             "nbu_catalog_backup_size_bytes",
-            "Bytes transferred by the last catalog backup job seen.",
+            "Bytes transferred by the last catalog backup job seen, summed "
+            "across parent and visible child jobs.",
         )
-        ts_m.add_metric([], last_ts)
-        st_m.add_metric([], float(last_status))
-        sz_m.add_metric([], float(last_size))
+        ts_m.add_metric([], latest_ts)
+        st_m.add_metric([], float(latest_status))
+        sz_m.add_metric([], float(last_size_kb * 1024))
         yield ts_m
         yield st_m
         yield sz_m

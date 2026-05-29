@@ -187,22 +187,35 @@ def _nbu_10_pool(
     return pool
 
 
+def _disk_pools_client(
+    pools: list[dict[str, Any]],
+    detail_attrs: dict[str, Any] | None = None,
+) -> Any:
+    """Return a MagicMock that serves both list and per-pool detail GETs."""
+    detail_payload = {"data": {"attributes": detail_attrs or {}}}
+
+    def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if path == "/storage/disk-pools":
+            return {"data": pools}
+        return detail_payload
+
+    client = MagicMock()
+    client.get.side_effect = _get
+    return client
+
+
 def test_disk_pools_collector_parses_nbu_10_0_shape() -> None:
     cfg = Config()
     pool = _nbu_10_pool(state="UP")
-    client = MagicMock()
-    client.get_all.return_value = [pool]
-    # Detail call returns pool-level capacity aggregates.
-    client.get.return_value = {
-        "data": {
-            "attributes": {
-                "rawSizeBytes": 47688433522688,
-                "usableSizeBytes": 47688433522688,
-                "availableSpaceBytes": 44619654436864,
-                "usedCapacityBytes": 3068779085824,
-            }
-        }
-    }
+    client = _disk_pools_client(
+        [pool],
+        detail_attrs={
+            "rawSizeBytes": 47688433522688,
+            "usableSizeBytes": 47688433522688,
+            "availableSpaceBytes": 44619654436864,
+            "usedCapacityBytes": 3068779085824,
+        },
+    )
     sub = DiskPoolsCollector(client, cfg)
     metrics = list(sub.collect(MagicMock()))
 
@@ -233,20 +246,44 @@ def test_disk_pools_collector_parses_nbu_10_0_shape() -> None:
 def test_disk_pools_detail_fetch_skipped_for_cloud() -> None:
     cfg = Config()
     cloud_pool = _nbu_10_pool(name="cloud-pool", category="CLOUD", with_volumes=False)
-    client = MagicMock()
-    client.get_all.return_value = [cloud_pool]
+    client = _disk_pools_client([cloud_pool])
     sub = DiskPoolsCollector(client, cfg)
     list(sub.collect(MagicMock()))
-    # Detail endpoint must not be called for cloud-category pools.
-    assert client.get.call_count == 0
+    # Only the list call should be made; CLOUD pools skip the detail fetch.
+    assert client.get.call_count == 1
+    assert client.get.call_args_list[0].args[0] == "/storage/disk-pools"
+
+
+def test_disk_pools_collector_uses_unpaginated_get() -> None:
+    """List endpoint is fetched with a single get(), no pagination params."""
+    cfg = Config()
+    pool = _nbu_10_pool(state="UP")
+    client = _disk_pools_client([pool])
+    sub = DiskPoolsCollector(client, cfg)
+    list(sub.collect(MagicMock()))
+    # get_all must NOT be invoked.
+    assert not client.get_all.called
+    list_call = client.get.call_args_list[0]
+    assert list_call.args[0] == "/storage/disk-pools"
+    assert list_call.kwargs.get("params") == {"fields": "*", "include": "*"}
+
+
+def test_disk_pools_handles_missing_data_key() -> None:
+    """An error payload without 'data' returns an empty list and warns."""
+    cfg = Config()
+    client = MagicMock()
+    client.get.return_value = {"errorCode": 8961, "errorMessage": "..."}
+    sub = DiskPoolsCollector(client, cfg)
+    metrics = list(sub.collect(MagicMock()))
+    # No pools means every gauge family is empty — no samples for capacity.
+    cap = _find(metrics, "nbu_disk_pool_capacity_bytes")
+    assert list(cap.samples) == []
 
 
 def test_disk_pools_string_state_down_emits_zero() -> None:
     cfg = Config()
     pool = _nbu_10_pool(name="pool-down", state="DOWN")
-    client = MagicMock()
-    client.get_all.return_value = [pool]
-    client.get.return_value = {"data": {"attributes": {}}}
+    client = _disk_pools_client([pool])
     sub = DiskPoolsCollector(client, cfg)
     metrics = list(sub.collect(MagicMock()))
     up = _find(metrics, "nbu_disk_pool_up")
@@ -306,7 +343,7 @@ def test_storage_servers_collector_parses_string_state() -> None:
         },
     ]
     client = MagicMock()
-    client.get_all.return_value = servers
+    client.get.return_value = {"data": servers}
     sub = StorageServersCollector(client, cfg)
     metrics = list(sub.collect(MagicMock()))
 
@@ -329,11 +366,43 @@ def test_storage_servers_collector_parses_string_state() -> None:
 def test_storage_servers_collector_uses_fields_include_params() -> None:
     cfg = Config()
     client = MagicMock()
-    client.get_all.return_value = []
+    client.get.return_value = {"data": []}
     sub = StorageServersCollector(client, cfg)
     list(sub.collect(MagicMock()))
-    _, kwargs = client.get_all.call_args
+    _, kwargs = client.get.call_args
     assert kwargs["params"] == {"fields": "*", "include": "*"}
+
+
+def test_storage_servers_collector_uses_unpaginated_get() -> None:
+    """v0.4.1: /storage/storage-servers is fetched with one get(), no pagination params.
+
+    NBU 10.0 rejects page[limit] >= 100 on this endpoint with HTTP 400
+    errorCode 8961. The collector must not call get_all().
+    """
+    cfg = Config()
+    client = MagicMock()
+    client.get.return_value = {"data": []}
+    sub = StorageServersCollector(client, cfg)
+    list(sub.collect(MagicMock()))
+    assert client.get.call_count == 1
+    assert not client.get_all.called
+    args, kwargs = client.get.call_args
+    assert args[0] == "/storage/storage-servers"
+    assert kwargs["params"] == {"fields": "*", "include": "*"}
+    # No pagination params anywhere in the call.
+    assert "page[limit]" not in kwargs["params"]
+    assert "page[offset]" not in kwargs["params"]
+
+
+def test_storage_servers_collector_handles_missing_data_key() -> None:
+    """An error response with no 'data' yields no samples and logs a warning."""
+    cfg = Config()
+    client = MagicMock()
+    client.get.return_value = {"errorCode": 1, "errorMessage": "kaboom"}
+    sub = StorageServersCollector(client, cfg)
+    metrics = list(sub.collect(MagicMock()))
+    info = _find(metrics, "nbu_storage_server_info")
+    assert list(info.samples) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -436,6 +505,69 @@ def test_msdp_only_emits_for_msdp_pools() -> None:
 def test_catalog_default_policy_type_is_underscore() -> None:
     """v0.4 default ships the underscore variant NBU 10.0 actually reports."""
     assert Config().collectors.catalog.policyTypeValues == ["NBU_CATALOG"]
+
+
+def _catalog_job(
+    job_id: int,
+    parent_id: int = 0,
+    kbytes: int = 0,
+    end: str = "2026-05-01T00:00:00Z",
+    status: int = 0,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "attributes": {
+            "jobId": job_id,
+            "parentJobId": parent_id,
+            "policyType": "NBU_CATALOG",
+            "status": status,
+            "kilobytesTransferred": kbytes,
+            "endTime": end,
+        }
+    }
+
+
+def test_catalog_size_sums_parent_and_children() -> None:
+    """Parent reports 0 bytes; children carry the real data — sum all of them."""
+    cfg = Config()
+    jobs = [
+        _catalog_job(job_id=1000, parent_id=0, kbytes=100, end="2026-05-01T01:00:00Z"),
+        _catalog_job(job_id=1001, parent_id=1000, kbytes=200),
+        _catalog_job(job_id=1002, parent_id=1000, kbytes=200),
+        _catalog_job(job_id=1003, parent_id=1000, kbytes=200),
+    ]
+    sub = CatalogCollector(cfg, _StaticCache(jobs))  # type: ignore[arg-type]
+    metrics = list(sub.collect(MagicMock()))
+    size = _find(metrics, "nbu_catalog_backup_size_bytes")
+    # (100 parent + 3 * 200 children) * 1024 bytes/KB
+    assert size.samples[0].value == (100 + 600) * 1024
+
+
+def test_catalog_size_falls_back_to_child_grouping() -> None:
+    """If only children are visible in the lookback, group on parentJobId."""
+    cfg = Config()
+    jobs = [
+        _catalog_job(job_id=2001, parent_id=2000, kbytes=150, end="2026-05-02T00:00:00Z"),
+        _catalog_job(job_id=2002, parent_id=2000, kbytes=250, end="2026-05-02T00:00:00Z"),
+        _catalog_job(job_id=2003, parent_id=2000, kbytes=350, end="2026-05-02T01:00:00Z"),
+    ]
+    sub = CatalogCollector(cfg, _StaticCache(jobs))  # type: ignore[arg-type]
+    metrics = list(sub.collect(MagicMock()))
+    size = _find(metrics, "nbu_catalog_backup_size_bytes")
+    # Latest is 2003 (350); siblings 2001+2002 share parent 2000 → sum them.
+    assert size.samples[0].value == (150 + 250 + 350) * 1024
+
+
+def test_catalog_size_zero_when_no_catalog_jobs() -> None:
+    """Empty cache → every output metric is 0."""
+    cfg = Config()
+    sub = CatalogCollector(cfg, _StaticCache([]))  # type: ignore[arg-type]
+    metrics = list(sub.collect(MagicMock()))
+    ts = _find(metrics, "nbu_catalog_backup_last_timestamp")
+    st = _find(metrics, "nbu_catalog_backup_last_status")
+    sz = _find(metrics, "nbu_catalog_backup_size_bytes")
+    assert ts.samples[0].value == 0.0
+    assert st.samples[0].value == 0.0
+    assert sz.samples[0].value == 0.0
 
 
 def test_catalog_collector_picks_matching_policy_type() -> None:
